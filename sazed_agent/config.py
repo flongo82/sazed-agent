@@ -76,6 +76,9 @@ def load(path):
     delays = retries.get("delays")
     if not isinstance(delays, list) or not delays or not all(_positive(d) for d in delays):
         raise ConfigError("retries.delays deve essere un elenco non vuoto di secondi positivi")
+    ping_interval, pong_timeout = _seconds(connection, "ping_interval"), _seconds(connection, "pong_timeout")
+    if pong_timeout >= ping_interval:
+        raise ConfigError("connection.pong_timeout deve essere minore di connection.ping_interval")
 
     return Config(
         root=root,
@@ -91,8 +94,8 @@ def load(path):
             done=_text(reactions, "done", "reactions."),
             failed=_text(reactions, "failed", "reactions."),
         ),
-        ping_interval=_seconds(connection, "ping_interval"),
-        pong_timeout=_seconds(connection, "pong_timeout"),
+        ping_interval=ping_interval,
+        pong_timeout=pong_timeout,
         retry_delays=tuple(float(d) for d in delays),
     )
 

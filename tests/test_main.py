@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sazed_agent.__main__ import main
+from sazed_agent.__main__ import AlreadyRunning, main, single_instance
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
 
@@ -43,6 +43,26 @@ class Check(unittest.TestCase):
         code, out, err = self.run_check()
         self.assertEqual(code, 1)
         self.assertIn("bot_token non esiste", err)
+
+
+class SingleInstance(unittest.TestCase):
+    def test_a_second_agent_on_the_same_data_is_refused(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        lock = tmp / "data" / "agent.lock"
+        with single_instance(lock):
+            with self.assertRaisesRegex(AlreadyRunning, "un altro agente"):
+                with single_instance(lock):
+                    pass
+        with single_instance(lock):  # libero di nuovo dopo l'uscita
+            pass
+
+    def test_run_without_configuration(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = main(["--config", "/nessuna/cartella/config.toml", "run"])
+        self.assertEqual(code, 1)
+        self.assertIn("setup.sh", err.getvalue())
 
 
 if __name__ == "__main__":

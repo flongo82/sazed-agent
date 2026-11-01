@@ -16,8 +16,11 @@ that it can be found again.
 ## Status
 
 Being built. Done so far: configuration, the local journal of incoming messages (durable,
-idempotent, with states that only move forward and limited retries) and the text catalog in
-Italian and English. Next: the connection with `sazed-bot`, then replies on Telegram. The
+idempotent, with states that only move forward and limited retries), the text catalog in
+Italian and English, and the connection with `sazed-bot`: every message is written to the
+journal before it is acknowledged, duplicates are recognised, and the agent reconnects by
+itself after a dropped or hung connection or after the computer wakes up from sleep. Next:
+reactions and replies on Telegram. The
 architecture, the reasons behind it and the protocol between the two parts are described in
 the README of `sazed-bot`.
 
@@ -31,6 +34,7 @@ scripts/setup.sh     # copies the agent token and the Worker's address from ../s
                      # asks for the bot token, writes config.toml
 scripts/build.sh     # builds the sazed-agent image (podman rmi sazed-agent removes it)
 scripts/test.sh      # runs the tests in the container, without network access
+scripts/run.sh       # starts the agent (podman stop sazed-agent stops it)
 ```
 
 `python3 -m sazed_agent check` verifies configuration, secrets and journal without connecting

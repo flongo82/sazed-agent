@@ -75,6 +75,7 @@ class Config(unittest.TestCase):
             ("delays = [5, 30, 120, 600, 3600]", "delays = []", "retries.delays"),
             ("ping_interval = 30", "ping_interval = 0", "ping_interval"),
             ('received = "👀"', 'received = ""', "reactions.received"),
+            ("pong_timeout = 10", "pong_timeout = 30", "minore di connection.ping_interval"),
         ]
         for old, new, message in cases:
             with self.subTest(new):
