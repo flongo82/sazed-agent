@@ -1,0 +1,17 @@
+# Tutto ciò che si installa, si scarica o si genera localmente resta fuori dal repository
+.venv/
+.cache/
+__pycache__/
+*.pyc
+secrets/
+tmp/
+data/
+
+# Configurazione personale, generata da scripts/setup.sh
+config.toml
+
+# coppermind: il catalogo è un dato, non codice
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
