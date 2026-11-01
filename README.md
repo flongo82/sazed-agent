@@ -15,9 +15,26 @@ that it can be found again.
 
 ## Status
 
-No code yet: for now this repository keeps only rules and intentions. The architecture, the
-reasons behind it and the protocol between the two parts are described in the README of
-`sazed-bot`.
+Being built. Done so far: configuration, the local journal of incoming messages (durable,
+idempotent, with states that only move forward and limited retries) and the text catalog in
+Italian and English. Next: the connection with `sazed-bot`, then replies on Telegram. The
+architecture, the reasons behind it and the protocol between the two parts are described in
+the README of `sazed-bot`.
+
+## Getting started
+
+You need `sazed-bot` already set up (its `secrets/` folder holds the agent token and the
+Worker's address), Podman, and your bot token.
+
+```bash
+scripts/setup.sh     # copies the agent token and the Worker's address from ../sazed-bot,
+                     # asks for the bot token, writes config.toml
+scripts/build.sh     # builds the sazed-agent image (podman rmi sazed-agent removes it)
+scripts/test.sh      # runs the tests in the container, without network access
+```
+
+`python3 -m sazed_agent check` verifies configuration, secrets and journal without connecting
+to anything.
 
 ## How it will work
 

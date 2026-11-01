@@ -1,0 +1,32 @@
+# Configuration of sazed-agent. scripts/setup.sh copies it to config.toml (ignored by git),
+# filling in your bot's name and language from sazed-bot. Paths are relative to this folder.
+
+# The name your bot introduces itself with, and the language of its messages: "auto" (the
+# language of the user's Telegram app), "it" or "en". Keep them equal to sazed-bot's.
+bot_name = "sazed"
+language = "auto"
+
+[secrets]
+agent_token = "secrets/agent_token"
+worker_url = "secrets/worker_url"
+bot_token = "secrets/bot_token"
+
+[storage]
+data_dir = "data"
+
+[telegram]
+api_base = "https://api.telegram.org"
+
+# Reactions set on your messages; only some emoji are accepted, see
+# https://core.telegram.org/bots/api#reactiontypeemoji
+[reactions]
+received = "👀"
+done = "👌"
+failed = "😢"
+
+[connection]
+ping_interval = 30   # seconds between two pings to the Worker
+pong_timeout = 10    # seconds to wait for the pong before reconnecting
+
+[retries]
+delays = [5, 30, 120, 600, 3600]   # seconds before each new attempt; then the item fails

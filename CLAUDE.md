@@ -8,13 +8,28 @@ il Worker è nel README di `../sazed-bot`.
 
 ## Stato
 
-Nessun codice ancora. Il primo passo è il client WebSocket con il registro locale degli
-ingressi, la reazione di ricezione e l'ack, che chiude il giro end-to-end, con prove mirate
-dei casi critici (`architettura.md`, capitolo 7).
+Passo 1 in corso (`architettura.md`, capitolo 7). Fatta la prima tappa: configurazione,
+registro locale degli ingressi, catalogo dei testi, `setup.sh`. Prossime: connessione con il
+Worker e ack, poi corsie, reazioni, risposta provvisoria e tentativi, poi `/stato` passato
+dal Worker all'agente.
+
+## Struttura
+
+- `sazed_agent/config.py`: `config.toml` e segreti (letti solo quando servono, mai mostrati)
+- `sazed_agent/journal.py`: registro locale in `data/coppermind.db` (WAL, synchronous=FULL)
+- `sazed_agent/messages.py`: tutti i testi per l'utente, in italiano e inglese
+- `sazed_agent/__main__.py`: `python3 -m sazed_agent check`
+- `tests/`: test con `unittest`, senza rete; finti Worker e Telegram quando servono
+- `Containerfile`, `scripts/`: immagine Podman, build, test, setup
 
 ## Comandi
 
-Ancora nessuno: aggiungili qui man mano che nascono (ambiente, test, avvio).
+```bash
+scripts/setup.sh                   # segreti e config.toml (chiede il token del bot)
+scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
+scripts/test.sh                    # tutti i test nel container, senza rete
+scripts/test.sh tests.test_journal # un solo modulo di test
+```
 
 ## Regole
 
