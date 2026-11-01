@@ -13,8 +13,8 @@ MESSAGES = {
             f"l'agente {name} è collegato. Messaggi da elaborare: {pending}, in errore: {failed}."
         ),
         "failed": lambda attempts: (
-            f"non sono riuscito a elaborare questo messaggio dopo {attempts} tentativi: "
-            "lo tengo da parte."
+            f"non sono riuscito a elaborare questo messaggio dopo {attempts} "
+            f"{'tentativo' if attempts == 1 else 'tentativi'}: lo tengo da parte."
         ),
         "status_command": "stato",
     },
@@ -25,7 +25,8 @@ MESSAGES = {
             f"the {name} agent is connected. Messages to process: {pending}, failed: {failed}."
         ),
         "failed": lambda attempts: (
-            f"I couldn't process this message after {attempts} attempts: I'm keeping it aside."
+            f"I couldn't process this message after {attempts} "
+            f"{'attempt' if attempts == 1 else 'attempts'}: I'm keeping it aside."
         ),
         "status_command": "status",
     },

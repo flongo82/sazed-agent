@@ -1,8 +1,8 @@
 """Punto d'ingresso: python3 -m sazed_agent <comando>.
 
 - check: verifica configurazione, segreti e registro senza collegarsi a nulla;
-- run: si collega al Worker, registra e conferma i messaggi. Per ora non li elabora ancora:
-  corsie, reazioni e risposte arrivano con la terza tappa del primo passo.
+- run: si collega al Worker, registra e conferma i messaggi, e li elabora nelle due corsie
+  (nel primo passo con una risposta provvisoria).
 """
 
 import argparse
@@ -16,8 +16,9 @@ from urllib.parse import urlsplit
 
 from .config import ConfigError, load
 from .journal import Journal
-from .lanes import lane_for
+from .lanes import Processor, lane_for
 from .link import WorkerLink, agent_url
+from .telegram import Telegram
 
 log = logging.getLogger("sazed_agent")
 
@@ -54,23 +55,27 @@ def check(config_path):
 
 def run(config_path):
     config = load(config_path)
-    url, token = agent_url(config.worker_url), config.agent_token
+    url, agent_token, bot_token = agent_url(config.worker_url), config.agent_token, config.bot_token
     with single_instance(config.data_dir / "agent.lock"):
         journal = Journal(config.journal_path)
         try:
-            link = WorkerLink(url, token, journal, lane_for, config.ping_interval, config.pong_timeout)
-            asyncio.run(_serve(link))
+            processor = Processor(journal, Telegram(config.telegram_api_base, bot_token), config.bot_name,
+                                  config.language, config.reactions, config.retry_delays)
+            link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
+                              config.pong_timeout, on_recorded=processor.notify)
+            asyncio.run(serve(link, processor))
         finally:
             journal.close()
 
 
-async def _serve(link):
-    stop = asyncio.Event()
+async def serve(link, processor, stop=None):
+    """Connessione e corsie insieme, fino a SIGTERM o SIGINT (o fino a stop, nei test)."""
+    stop = stop or asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     log.info("agente avviato")
-    await link.run(stop)
+    await asyncio.gather(link.run(stop), processor.run(stop))
     log.info("agente fermato")
 
 

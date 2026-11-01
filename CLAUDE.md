@@ -8,21 +8,24 @@ il Worker è nel README di `../sazed-bot`.
 
 ## Stato
 
-Passo 1 in corso (`architettura.md`, capitolo 7). Fatte le prime due tappe: configurazione,
+Passo 1 in corso (`architettura.md`, capitolo 7). Fatte le prime tre tappe: configurazione,
 registro locale, catalogo dei testi, `setup.sh`; connessione con il Worker (registro prima
-dell'ack, doppioni, riconnessione con attese crescenti, pong mancanti, sospensione del
-computer). Prossime: corsie, reazioni, risposta provvisoria e tentativi, poi `/stato`
-passato dal Worker all'agente.
+dell'ack, doppioni, riconnessione, pong mancanti, sospensione del computer); corsie con
+reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Prossime: `/stato` passato dal
+Worker all'agente quando è collegato, giro completo con il vero Worker, prova MTProto.
 
 ## Struttura
 
 - `sazed_agent/config.py`: `config.toml` e segreti (letti solo quando servono, mai mostrati)
 - `sazed_agent/journal.py`: registro locale in `data/coppermind.db` (WAL, synchronous=FULL)
 - `sazed_agent/messages.py`: tutti i testi per l'utente, in italiano e inglese
-- `sazed_agent/lanes.py`: smistamento nelle corsie (comandi, acquisizione)
+- `sazed_agent/lanes.py`: le due corsie (comandi, acquisizione), stati, tentativi, reazioni
 - `sazed_agent/link.py`: connessione WebSocket con il Worker, ack, riconnessioni
+- `sazed_agent/telegram.py`: chiamate all'API dei bot ed errori (definitivi, da riprovare, di
+  configurazione); il token non compare mai nei messaggi di errore
 - `sazed_agent/__main__.py`: `python3 -m sazed_agent check` e `run` (istanza unica per `data/`)
-- `tests/`: test con `unittest`, senza rete; `tests/fake_worker.py` è un finto sazed-bot
+- `tests/`: test con `unittest`, senza rete; `fake_worker.py` e `fake_telegram.py` sono un
+  finto sazed-bot e un finto Telegram, `test_flow.py` prova il giro completo
 - `Containerfile`, `scripts/`: immagine Podman, build, test, setup
 
 ## Comandi

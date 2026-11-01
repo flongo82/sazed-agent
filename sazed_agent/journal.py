@@ -125,9 +125,17 @@ class Journal:
                 (reply_message_id, self.clock(), update_id),
             )
 
-    def retry_later(self, update_id, error, delays):
+    def next_attempt(self, lane):
+        """L'istante del prossimo tentativo in programma nella corsia, o None se non c'è nulla."""
+        row = self.db.execute(
+            "SELECT MIN(next_attempt_at) FROM inbox WHERE lane = ? AND state NOT IN ('done', 'failed')",
+            (lane,)).fetchone()
+        return row[0]
+
+    def retry_later(self, update_id, error, delays, min_delay=0):
         """Un tentativo è fallito: si riprova dopo l'attesa successiva, o l'elemento fallisce.
 
+        min_delay allunga l'attesa quando chi ha rifiutato ha chiesto di aspettare (429).
         Restituisce lo stato risultante: quello di prima se si riproverà, "failed" se le
         attese sono finite.
         """
@@ -141,13 +149,25 @@ class Journal:
             if attempts > len(delays):
                 state, next_at = "failed", now
             else:
-                state, next_at = current, now + delays[attempts - 1]
+                state, next_at = current, now + max(delays[attempts - 1], min_delay or 0)
             self.db.execute(
                 "UPDATE inbox SET attempts = ?, state = ?, next_attempt_at = ?, last_error = ?,"
                 " updated_at = ? WHERE update_id = ?",
                 (attempts, state, next_at, str(error)[:500], now, update_id),
             )
         return state
+
+    def postpone(self, update_id, seconds, error):
+        """Rimanda un elemento senza contare un tentativo: il problema non è suo (per esempio
+        un token rifiutato), e non deve fargli consumare le attese."""
+        with self._transaction():
+            if self._state(update_id) in FINAL:
+                raise JournalError(f"{update_id}: è già finale")
+            now = self.clock()
+            self.db.execute(
+                "UPDATE inbox SET next_attempt_at = ?, last_error = ?, updated_at = ? WHERE update_id = ?",
+                (now + seconds, str(error)[:500], now, update_id),
+            )
 
     def fail(self, update_id, error):
         """Errore definitivo (per esempio Telegram rifiuta in modo permanente): niente tentativi."""
@@ -156,13 +176,18 @@ class Journal:
             if current in FINAL:
                 raise JournalError(f"{update_id}: è già {current}")
             self.db.execute(
-                "UPDATE inbox SET state = 'failed', last_error = ?, updated_at = ? WHERE update_id = ?",
+                "UPDATE inbox SET state = 'failed', attempts = attempts + 1, last_error = ?,"
+                " updated_at = ? WHERE update_id = ?",
                 (str(error)[:500], self.clock(), update_id),
             )
 
-    def counts(self):
-        """Quanti elementi per stato, per /stato."""
-        rows = self.db.execute("SELECT state, COUNT(*) AS n FROM inbox GROUP BY state").fetchall()
+    def counts(self, lane=None):
+        """Quanti elementi per stato, in tutto o in una corsia, per /stato."""
+        if lane is None:
+            rows = self.db.execute("SELECT state, COUNT(*) AS n FROM inbox GROUP BY state").fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT state, COUNT(*) AS n FROM inbox WHERE lane = ? GROUP BY state", (lane,)).fetchall()
         found = {r["state"]: r["n"] for r in rows}
         return {state: found.get(state, 0) for state in STATES}
 

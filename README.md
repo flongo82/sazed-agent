@@ -19,8 +19,12 @@ Being built. Done so far: configuration, the local journal of incoming messages 
 idempotent, with states that only move forward and limited retries), the text catalog in
 Italian and English, and the connection with `sazed-bot`: every message is written to the
 journal before it is acknowledged, duplicates are recognised, and the agent reconnects by
-itself after a dropped or hung connection or after the computer wakes up from sleep. Next:
-reactions and replies on Telegram. The
+itself after a dropped or hung connection or after the computer wakes up from sleep. Each
+message then gets 👀, a provisional reply and 👌; the status command answers at once, even
+while a long job is running; failed attempts are retried with growing delays, and a message
+that keeps failing is set aside with a notice, without blocking the others. Next: the Worker
+hands the status command to the agent when it is connected; then the agent starts reading
+what you send. The
 architecture, the reasons behind it and the protocol between the two parts are described in
 the README of `sazed-bot`.
 
