@@ -11,8 +11,9 @@ il Worker è nel README di `../sazed-bot`.
 Passo 1 in corso (`architettura.md`, capitolo 7). Fatte le prime tre tappe: configurazione,
 registro locale, catalogo dei testi, `setup.sh`; connessione con il Worker (registro prima
 dell'ack, doppioni, riconnessione, pong mancanti, sospensione del computer); corsie con
-reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Prossime: `/stato` passato dal
-Worker all'agente quando è collegato, giro completo con il vero Worker, prova MTProto.
+reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Dalla quarta tappa il Worker
+passa `/stato` all'agente quando è collegato: va risposto e confermato in fretta, perché dopo
+15 s senza ack risponde il Worker. Prossime: giro completo con il vero Worker, prova MTProto.
 
 ## Struttura
 
