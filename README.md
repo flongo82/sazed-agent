@@ -24,8 +24,9 @@ message then gets 👀, a provisional reply and 👌; the status command answers
 while a long job is running; failed attempts are retried with growing delays, and a message
 that keeps failing is set aside with a notice, without blocking the others. While the agent
 is connected the status command reaches it, and the Worker answers only for an agent that is
-off or silent. A contract test runs the agent against the real Worker code on this computer.
-Next: the agent starts reading what you send. The architecture, the reasons behind it and the
+off or silent. A contract test runs the agent against the real Worker code on this computer, and a probe
+has shown that the bot downloads through MTProto files beyond the Bot API's 20 MB while the
+webhook keeps working. Next: the agent starts reading what you send. The architecture, the reasons behind it and the
 protocol between the two parts are described in the README of `sazed-bot`.
 
 ## Getting started

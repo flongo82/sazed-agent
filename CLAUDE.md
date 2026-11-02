@@ -8,14 +8,17 @@ il Worker è nel README di `../sazed-bot`.
 
 ## Stato
 
-Passo 1 in corso (`architettura.md`, capitolo 7). Fatte le prime tre tappe: configurazione,
-registro locale, catalogo dei testi, `setup.sh`; connessione con il Worker (registro prima
-dell'ack, doppioni, riconnessione, pong mancanti, sospensione del computer); corsie con
-reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Dalla quarta tappa il Worker
-passa `/stato` all'agente quando è collegato: va risposto e confermato in fretta, perché dopo
-15 s senza ack risponde il Worker. Quinta tappa: la prova di contratto (`tests/contract.py`)
-fa girare l'agente contro il codice del Worker in `wrangler dev`, e il giro dal telefono con il
-Worker pubblicato è riuscito. In corso: la prova MTProto (`spikes/mtproto.py`).
+Primo passo completato (`architettura.md`, capitolo 7, punto 4.1). Fatte le prime tre tappe:
+configurazione, registro locale, catalogo dei testi, `setup.sh`; connessione con il Worker
+(registro prima dell'ack, doppioni, riconnessione, pong mancanti, sospensione del computer);
+corsie con reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Dalla quarta tappa il
+Worker passa `/stato` all'agente quando è collegato: va risposto e confermato in fretta, perché
+dopo 15 s senza ack risponde il Worker. Quinta tappa: la prova di contratto
+(`tests/contract.py`) fa girare l'agente contro il codice del Worker in `wrangler dev`, e il
+giro dal telefono con il Worker pubblicato è riuscito. Sesta tappa: la prova MTProto
+(`spikes/mtproto.py`) ha mostrato che il bot scarica via MTProto un file oltre i 20 MB mentre
+il webhook continua a funzionare (1,1 MB/s, una richiesta alla volta). Prossimo passo:
+coppermind, con salvataggio e ricerca.
 
 ## Struttura
 
