@@ -15,7 +15,7 @@ reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Dalla quarta tapp
 passa `/stato` all'agente quando è collegato: va risposto e confermato in fretta, perché dopo
 15 s senza ack risponde il Worker. Quinta tappa: la prova di contratto (`tests/contract.py`)
 fa girare l'agente contro il codice del Worker in `wrangler dev`, e il giro dal telefono con il
-Worker pubblicato è riuscito. Prossima: la prova MTProto.
+Worker pubblicato è riuscito. In corso: la prova MTProto (`spikes/mtproto.py`).
 
 ## Struttura
 
@@ -30,17 +30,21 @@ Worker pubblicato è riuscito. Prossima: la prova MTProto.
 - `tests/`: test con `unittest`, senza rete; `fake_worker.py` e `fake_telegram.py` sono un
   finto sazed-bot e un finto Telegram, `test_flow.py` prova il giro completo. `contract.py`
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
+- `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
+  `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
 - `Containerfile`, `scripts/`: immagine Podman, build, test, setup
 
 ## Comandi
 
 ```bash
 scripts/setup.sh                   # segreti e config.toml (chiede il token del bot)
+scripts/setup-mtproto.sh           # api_id e api_hash da my.telegram.org, secrets/mtproto/
 scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
 scripts/test.sh                    # tutti i test nel container, senza rete
 scripts/test.sh tests.test_journal # un solo modulo di test
 scripts/contract-test.sh           # agente contro il Worker in wrangler dev (Node di ../sazed-bot)
 scripts/run.sh                     # avvia l'agente nel container (podman stop sazed-agent)
+scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente acceso)
 ```
 
 ## Regole
@@ -96,8 +100,11 @@ scripts/run.sh                     # avvia l'agente nel container (podman stop s
   toolkit di NVIDIA per la GPU, ma anche il download di immagini e modelli.
 - Segreti (AGENT_TOKEN, token del bot, chiave API di Anthropic, `api_id` e `api_hash`, cookie
   di Instagram) solo in `secrets/`, con permessi 700: mai nel codice, nei test, nei log o
-  nei commit. AGENT_TOKEN nasce da `scripts/setup-secrets.sh` di `sazed-bot`; come arriva qui il
-  token del bot è ancora da decidere (quello script non lo salva su disco).
+  nei commit. AGENT_TOKEN nasce da `scripts/setup-secrets.sh` di `sazed-bot`, il token del bot
+  lo chiede `scripts/setup.sh`. Via MTProto l'agente entra solo con il token
+  del bot (`receive_updates=False`, per non togliere aggiornamenti al webhook), mai con
+  l'account dell'utente; la sua sessione è l'unico segreto che scrive, in `secrets/mtproto/`,
+  la sola parte di `secrets/` montata in scrittura.
 - Ogni nuovo comportamento richiede un test, e i test devono passare prima di dichiarare
   finito un lavoro. Se cambia il protocollo, o il modo in cui l'agente lo usa, deve passare
   anche `scripts/contract-test.sh`. I test non dipendono da Telegram, Cloudflare o dall'API di Claude reali:

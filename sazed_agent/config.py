@@ -12,6 +12,9 @@ from pathlib import Path
 from .messages import MESSAGES
 
 
+MTPROTO_SETUP = "scripts/setup-mtproto.sh"
+
+
 class ConfigError(Exception):
     """Configurazione o segreto mancante o non valido."""
 
@@ -32,6 +35,9 @@ class Config:
     agent_token_file: Path
     worker_url_file: Path
     bot_token_file: Path
+    api_id_file: Path | None      # MTProto, per i file oltre i 20 MB: scripts/setup-mtproto.sh
+    api_hash_file: Path | None
+    mtproto_dir: Path | None      # la sessione MTProto del bot, l'unico segreto che si scrive
     telegram_api_base: str
     reactions: Reactions
     ping_interval: float
@@ -53,6 +59,21 @@ class Config:
     @property
     def bot_token(self):
         return _secret(self.bot_token_file)
+
+    @property
+    def api_id(self):
+        value = _secret(_mtproto(self.api_id_file, "api_id"), MTPROTO_SETUP)
+        if not value.isdigit():
+            raise ConfigError(f"{self.api_id_file} non contiene un api_id: lancia {MTPROTO_SETUP}")
+        return int(value)
+
+    @property
+    def api_hash(self):
+        return _secret(_mtproto(self.api_hash_file, "api_hash"), MTPROTO_SETUP)
+
+    @property
+    def mtproto_session_file(self):
+        return _mtproto(self.mtproto_dir, "mtproto_dir") / "session"
 
 
 def load(path):
@@ -88,6 +109,9 @@ def load(path):
         agent_token_file=root / _text(secrets, "agent_token", "secrets."),
         worker_url_file=root / _text(secrets, "worker_url", "secrets."),
         bot_token_file=root / _text(secrets, "bot_token", "secrets."),
+        api_id_file=_optional_path(root, secrets, "api_id"),
+        api_hash_file=_optional_path(root, secrets, "api_hash"),
+        mtproto_dir=_optional_path(root, secrets, "mtproto_dir"),
         telegram_api_base=_text(telegram, "api_base", "telegram.").rstrip("/"),
         reactions=Reactions(
             received=_text(reactions, "received", "reactions."),
@@ -114,6 +138,17 @@ def _text(table, key, prefix=""):
     return value.strip()
 
 
+def _optional_path(root, secrets, key):
+    """Un percorso di [secrets] che può mancare: config.toml di prima di MTProto non lo ha."""
+    return root / _text(secrets, key, "secrets.") if key in secrets else None
+
+
+def _mtproto(path, key):
+    if path is None:
+        raise ConfigError(f"secrets.{key} manca in config.toml: lancia {MTPROTO_SETUP}")
+    return path
+
+
 def _positive(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
@@ -125,13 +160,13 @@ def _seconds(table, key):
     return float(value)
 
 
-def _secret(path):
+def _secret(path, setup="scripts/setup.sh"):
     """Il contenuto di un file segreto, senza spazi né a capo. Rifiuta file leggibili da altri."""
     try:
         mode = path.stat().st_mode
         value = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        raise ConfigError(f"{path} non esiste: lancia scripts/setup.sh") from None
+        raise ConfigError(f"{path} non esiste: lancia {setup}") from None
     if mode & (stat.S_IRWXG | stat.S_IRWXO):
         raise ConfigError(f"{path} è leggibile da altri utenti: chmod 600 {path}")
     if not value:

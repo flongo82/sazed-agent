@@ -69,6 +69,35 @@ class Config(unittest.TestCase):
             load(self.path).bot_token
         self.assertNotIn("SEGRETO", str(ctx.exception))
 
+    def test_mtproto_secrets(self):
+        self.secret("api_id", " 1234567\n")
+        self.secret("api_hash", "0123456789abcdef0123456789abcdef\n")
+        config = load(self.path)
+        self.assertEqual(config.api_id, 1234567)
+        self.assertEqual(config.api_hash, "0123456789abcdef0123456789abcdef")
+        self.assertEqual(config.mtproto_session_file, self.dir / "secrets" / "mtproto" / "session")
+
+    def test_missing_mtproto_secret_points_to_its_setup(self):
+        with self.assertRaisesRegex(ConfigError, "api_id non esiste: lancia scripts/setup-mtproto.sh"):
+            load(self.path).api_id
+
+    def test_api_id_that_is_not_a_number_is_refused_without_showing_it(self):
+        self.secret("api_id", "SEGRETO")
+        with self.assertRaisesRegex(ConfigError, "setup-mtproto.sh") as ctx:
+            load(self.path).api_id
+        self.assertNotIn("SEGRETO", str(ctx.exception))
+
+    def test_config_from_before_mtproto_still_works_and_points_to_its_setup(self):
+        for line in ('api_id = "secrets/api_id"', 'api_hash = "secrets/api_hash"', "mtproto_dir = "):
+            text = self.path.read_text(encoding="utf-8")
+            self.path.write_text("\n".join(l for l in text.splitlines() if not l.startswith(line)) + "\n",
+                                 encoding="utf-8")
+        config = load(self.path)
+        self.assertEqual(config.bot_token, "123:ABC")
+        for name in ("api_id", "api_hash", "mtproto_session_file"):
+            with self.subTest(name), self.assertRaisesRegex(ConfigError, "manca in config.toml.*setup-mtproto.sh"):
+                getattr(config, name)
+
     def test_invalid_values(self):
         cases = [
             ('language = "auto"', 'language = "fr"', "language"),

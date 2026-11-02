@@ -36,12 +36,20 @@ Worker's address), Podman, and your bot token.
 ```bash
 scripts/setup.sh          # copies the agent token and the Worker's address from ../sazed-bot,
                           # asks for the bot token, writes config.toml
+scripts/setup-mtproto.sh  # asks for the api_id and api_hash of an application created on
+                          # my.telegram.org, to download files beyond the Bot API's 20 MB
 scripts/build.sh          # builds the sazed-agent image (podman rmi sazed-agent removes it)
 scripts/test.sh           # runs the tests in the container, without network access
 scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev, with Node and
                           # wrangler from ../sazed-bot (read-only) and no network access
 scripts/run.sh            # starts the agent (podman stop sazed-agent stops it)
+scripts/mtproto-probe.sh  # experiment, with the agent on: the bot downloads a file you send
+                          # beyond 20 MB through MTProto, while the webhook keeps working
 ```
+
+Through MTProto the agent logs in with the bot token, never with your account: `api_id` and
+`api_hash` only identify the application. Its session is the one secret the agent writes, in
+`secrets/mtproto/`, the only part of `secrets/` mounted writable.
 
 `python3 -m sazed_agent check` verifies configuration, secrets and journal without connecting
 to anything.

@@ -10,6 +10,10 @@ language = "auto"
 agent_token = "secrets/agent_token"
 worker_url = "secrets/worker_url"
 bot_token = "secrets/bot_token"
+# MTProto, to download files beyond the Bot API's 20 MB: filled in by scripts/setup-mtproto.sh
+api_id = "secrets/api_id"
+api_hash = "secrets/api_hash"
+mtproto_dir = "secrets/mtproto"   # the bot's MTProto session, written by the agent
 
 [storage]
 data_dir = "data"

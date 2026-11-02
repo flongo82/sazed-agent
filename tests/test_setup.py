@@ -112,5 +112,84 @@ class Setup(unittest.TestCase):
         self.assertIn("set up sazed-bot first", result.stderr)
 
 
+API_ID, API_HASH = "1234567", "0123456789abcdef0123456789ABCDEF"
+BEFORE_MTPROTO = """bot_name = "mio"
+
+[secrets]
+agent_token = "secrets/agent_token"
+worker_url = "secrets/worker_url"
+bot_token = "secrets/bot_token"
+
+[storage]
+data_dir = "data"
+"""
+
+
+class SetupMtproto(unittest.TestCase):
+    def setUp(self):
+        self.agent = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.agent)
+        (self.agent / "scripts").mkdir()
+        (self.agent / "secrets").mkdir(mode=0o700)
+        shutil.copy(ROOT / "scripts" / "setup-mtproto.sh", self.agent / "scripts")
+        self.config = self.agent / "config.toml"
+        self.config.write_text(BEFORE_MTPROTO)
+
+    def run_setup(self, typed):
+        return subprocess.run(["bash", str(self.agent / "scripts" / "setup-mtproto.sh")],
+                              input=typed, capture_output=True, text=True)
+
+    def mode(self, path):
+        return stat.S_IMODE(path.stat().st_mode)
+
+    def test_saves_the_secrets_and_completes_an_older_config(self):
+        result = self.run_setup(f" {API_ID}\r\n\x1b[200~{API_HASH}\x1b[201~\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        secrets = self.agent / "secrets"
+        for name, value in [("api_id", API_ID), ("api_hash", API_HASH)]:
+            self.assertEqual((secrets / name).read_text(), value, name)
+            self.assertEqual(self.mode(secrets / name), 0o600, name)
+        self.assertEqual(self.mode(secrets / "mtproto"), 0o700)
+        config = tomllib.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(config["secrets"], {
+            "agent_token": "secrets/agent_token", "worker_url": "secrets/worker_url",
+            "bot_token": "secrets/bot_token", "api_id": "secrets/api_id",
+            "api_hash": "secrets/api_hash", "mtproto_dir": "secrets/mtproto"})
+        self.assertEqual(config["storage"], {"data_dir": "data"})
+        for value in (API_ID, API_HASH):
+            self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_running_it_again_changes_only_the_secrets(self):
+        self.assertEqual(self.run_setup(f"{API_ID}\n{API_HASH}\n").returncode, 0)
+        config = self.config.read_text(encoding="utf-8")
+        result = self.run_setup(f"7654321\n{'f' * 32}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already points to them", result.stdout)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), config)
+        self.assertEqual((self.agent / "secrets" / "api_id").read_text(), "7654321")
+
+    def test_the_example_config_already_has_the_lines(self):
+        shutil.copy(ROOT / "config.example.toml", self.config)
+        self.assertEqual(self.run_setup(f"{API_ID}\n{API_HASH}\n").returncode, 0)
+        self.assertEqual(self.config.read_text(encoding="utf-8"),
+                         (ROOT / "config.example.toml").read_text(encoding="utf-8"))
+
+    def test_malformed_values_are_refused_and_nothing_is_saved(self):
+        for typed, message in [("abc\n", "does not look like an api_id"), ("\n", "does not look like an api_id"),
+                               (f"{API_ID}\nnon-esadecimale\n", "does not look like an api_hash"),
+                               (f"{API_ID}\n{'a' * 31}\n", "does not look like an api_hash")]:
+            with self.subTest(typed):
+                result = self.run_setup(typed)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((self.agent / "secrets" / "api_id").exists())
+
+    def test_setup_must_come_first(self):
+        self.config.unlink()
+        result = self.run_setup(f"{API_ID}\n{API_HASH}\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("run scripts/setup.sh first", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
