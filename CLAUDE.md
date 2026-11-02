@@ -47,6 +47,9 @@ scripts/run.sh                     # avvia l'agente nel container (podman stop s
 
 - Il protocollo WebSocket con `sazed-bot` è un contratto: se lo cambi, aggiorna anche
   `sazed-bot` (codice, test e README) e `architettura.md`, e segnalalo.
+- Un solo agente per Worker: sul codice 4000 (un altro agente ha preso il posto di questo)
+  l'agente si ferma con il codice di uscita 2, senza ricollegarsi. I frame del Worker che non
+  sono oggetti JSON si ignorano.
 - Ogni messaggio ricevuto si scrive subito nel registro locale degli ingressi (stesso
   database di coppermind) e solo allora si conferma al Worker con `ack`. Il registro è
   idempotente sull'`update_id`: un messaggio riconsegnato non crea un secondo elemento.

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sazed_agent.journal import Journal
 from sazed_agent.lanes import lane_for
-from sazed_agent.link import WorkerLink, agent_url
+from sazed_agent.link import Replaced, WorkerLink, agent_url
 from tests.fake_worker import TOKEN, FakeWorker
 
 
@@ -147,6 +147,28 @@ class LinkTest(unittest.IsolatedAsyncioTestCase):
         offset = 3600.0  # il computer è rimasto sospeso un'ora
         await self.until(lambda: self.worker.connections >= 2)
         self.assertEqual(link.delays, [])
+
+    async def test_replaced_by_another_agent_stops_instead_of_reconnecting(self):
+        link = self.make_link()
+        task = asyncio.create_task(link.run(self.stop))
+        await self.until(lambda: self.worker.hellos == 1)
+        with self.assertLogs("sazed_agent.link", level="ERROR") as logs:
+            await self.worker.replace()
+            with self.assertRaises(Replaced):
+                await asyncio.wait_for(task, 2)
+        self.assertIn("un altro agente", logs.output[0])
+        await asyncio.sleep(0.3)  # oltre la prima attesa prima di riprovare
+        self.assertEqual(self.worker.connections, 1)
+
+    async def test_frames_that_are_not_objects_are_ignored(self):
+        link = self.make_link()
+        await self.start(link)
+        await self.until(lambda: self.worker.hellos == 1)
+        for frame in ("null", "[]", "42", '"testo"', "{non è json"):
+            await self.worker.send_raw(frame)
+        queue_id = await self.worker.push(update(7))
+        await self.until(lambda: queue_id in self.worker.acks)
+        self.assertEqual(self.worker.connections, 1)  # nessuna riconnessione: la connessione regge
 
     async def test_stop_ends_the_link_promptly(self):
         link = self.make_link()

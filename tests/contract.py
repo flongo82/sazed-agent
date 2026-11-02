@@ -3,8 +3,9 @@
 Gira nel container, senza rete (scripts/contract-test.sh): wrangler dev esegue il codice del
 Worker, due finti Telegram rispondono uno al Worker e uno all'agente, e l'agente parte come in
 produzione (python3 -m sazed_agent run) con una configurazione ricavata da config.example.toml.
-Prova il protocollo da un capo all'altro: arretrato, ack, messaggi con l'agente collegato,
-/stato all'agente, doppioni, arresto ordinato e arresto brusco.
+Prova il protocollo da un capo all'altro: arretrato (consegnato a passi, con una finestra di 2),
+ack, messaggi con l'agente collegato, /stato all'agente, doppioni, arresto ordinato e brusco,
+e un secondo agente che prende il posto del primo.
 
 Non è nella scoperta di unittest (scripts/test.sh): serve sazed-bot, con Node e node_modules.
 """
@@ -114,7 +115,7 @@ def start_worker(work):
         "WEBHOOK_SECRET": SECRET, "AGENT_TOKEN": AGENT_TOKEN, "TELEGRAM_BOT_TOKEN": FakeTelegram().token,
         "ALLOWED_USER_ID": str(USER), "TELEGRAM_API_BASE": f"http://127.0.0.1:{WORKER_TELEGRAM_PORT}",
         "BOT_NAME": BOT_NAME, "LANGUAGE": "auto",
-        "AGENT_TIMEOUT_SECONDS": "3", "AGENT_STATUS_GRACE_SECONDS": "1",
+        "AGENT_TIMEOUT_SECONDS": "3", "AGENT_STATUS_GRACE_SECONDS": "1", "AGENT_WINDOW": "2",
     }
     args = [str(BOT / "node/bin/node"), str(BOT / "worker/node_modules/wrangler/bin/wrangler.js"),
             "dev", "--config", str(root / "wrangler.jsonc"), "--port", str(PORT), "--ip", "127.0.0.1",
@@ -142,9 +143,9 @@ def stop_group(process):
             pass
 
 
-def agent_config(work, telegram):
+def agent_config(work, telegram, name="agent"):
     """config.toml e segreti di prova, ricavati dal modello come fa setup.sh."""
-    root = work / "agent"
+    root = work / name
     secrets = root / "secrets"
     secrets.mkdir(parents=True)
     secrets.chmod(0o700)
@@ -186,19 +187,22 @@ def main():
     tg_agent = FakeTelegram().start()                         # risponde all'agente
     print("Avvio di wrangler dev…", flush=True)
     worker = start_worker(work)
-    agent_log = open(work / "agent.log", "wb")
+    agent_log, other_log = open(work / "agent.log", "wb"), open(work / "other.log", "wb")
     agent = Agent(agent_config(work, tg_agent), agent_log)
+    other = Agent(agent_config(work, tg_agent, "other"), other_log)  # un secondo agente, altrove
     it, en = messages_for("it"), messages_for("en")
     try:
-        run(agent, tg_worker, tg_agent, it, en)
+        run(agent, other, tg_worker, tg_agent, it, en, work)
     finally:
-        if agent.process and agent.process.poll() is None:
-            agent.stop()
+        for a in (agent, other):
+            if a.process and a.process.poll() is None:
+                a.stop()
         stop_group(worker)
         tg_worker.stop()
         tg_agent.stop()
         agent_log.close()
-    log = (work / "agent.log").read_text(errors="replace")
+        other_log.close()
+    log = (work / "agent.log").read_text(errors="replace") + (work / "other.log").read_text(errors="replace")
     check("nel log dell'agente nessun errore imprevisto", "Traceback" not in log, log[-2000:])
     check("nel log dell'agente nessun segreto",
           tg_agent.token not in log and AGENT_TOKEN not in log)
@@ -210,7 +214,7 @@ def main():
     return 1 if failures else 0
 
 
-def run(agent, tg_worker, tg_agent, it, en):
+def run(agent, other, tg_worker, tg_agent, it, en, work):
     hello_it, hello_en = it["hello"](FIRST_NAME), en["hello"](FIRST_NAME)
 
     print("\n# Fase 1: l'agente non si è mai collegato")
@@ -264,18 +268,22 @@ def run(agent, tg_worker, tg_agent, it, en):
     check("il Worker sa che l'agente non è collegato",
           text.startswith(f"{hello_it}, l'agente {BOT_NAME} non è collegato"), text)
     check("tutto confermato: la coda del Worker è vuota", text.endswith("Messaggi da processare: 0."), text)
-    later = message("una nota per dopo")
-    post(later)
-    text = (wait_until(lambda: replies(tg_worker, later)) or [""])[0]
-    check("un messaggio ad agente spento resta in coda", text.endswith("Messaggi da processare: 1."), text)
+    later = [message(f"una nota per dopo, {i}") for i in (1, 2, 3)]
+    for update in later:
+        post(update)
+    text = (wait_until(lambda: replies(tg_worker, later[-1])) or [""])[0]
+    check("i messaggi ad agente spento restano in coda", text.endswith("Messaggi da processare: 3."), text)
 
-    print("\n# Fase 5: ripartenza")
+    print("\n# Fase 5: ripartenza, arretrato più lungo della finestra")
     sent = len(tg_agent.ok_calls("sendMessage"))
     agent.start()
-    wait_until(lambda: "👌" in reactions(tg_agent, later), 30)
-    check("l'agente elabora il messaggio rimasto in coda", len(replies(tg_agent, later)) == 1)
+    wait_until(lambda: all("👌" in reactions(tg_agent, u) for u in later), 30)
+    check("l'agente elabora tutti i messaggi rimasti in coda, uno per uno",
+          all(len(replies(tg_agent, u)) == 1 for u in later))
+    order = [p["reply_parameters"]["message_id"] for _, p in tg_agent.ok_calls("sendMessage")[sent:]]
+    check("nell'ordine in cui sono arrivati", order == [u["message"]["message_id"] for u in later], order)
     check("e nient'altro: il registro ricorda quelli già fatti", quiet(tg_agent, 1.5) == 0
-          and len(tg_agent.ok_calls("sendMessage")) == sent + 1)
+          and len(tg_agent.ok_calls("sendMessage")) == sent + 3)
 
     print("\n# Fase 6: arresto brusco")
     agent.stop(signal.SIGKILL)
@@ -288,6 +296,24 @@ def run(agent, tg_worker, tg_agent, it, en):
     check("dopo un arresto brusco il messaggio arriva comunque", len(replies(tg_agent, lost)) == 1)
     check("senza doppioni", quiet(tg_agent, 1.5) == 0 and len(tg_agent.ok_calls("sendMessage")) == sent + 1)
     check("l'agente si ferma con SIGTERM", agent.stop() == 0)
+
+    print("\n# Fase 7: un secondo agente si collega allo stesso Worker")
+    agent.start()
+    before = message("prima del secondo agente")
+    post(before)
+    wait_until(lambda: "👌" in reactions(tg_agent, before), 30)
+    other.start()
+    try:
+        code = agent.process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        code = None
+    check("il primo agente si ferma da sé, senza contendersi la connessione", code == 2, code)
+    check("e spiega perché", "un altro agente" in (work / "agent.log").read_text(errors="replace"))
+    after = message("per il secondo agente")
+    post(after)
+    wait_until(lambda: "👌" in reactions(tg_agent, after), 30)
+    check("il secondo agente riceve i messaggi nuovi", len(replies(tg_agent, after)) == 1)
+    check("il secondo agente si ferma con SIGTERM", other.stop() == 0)
     status = message("/stato")
     post(status)
     text = (wait_until(lambda: replies(tg_worker, status)) or [""])[0]

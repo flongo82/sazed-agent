@@ -1,9 +1,10 @@
 """Finto sazed-bot per i test: stesso protocollo WebSocket del vero Worker (README di sazed-bot).
 
-Tiene una coda, la manda a chi si collega con "hello", toglie gli elementi confermati con
-"ack", risponde "pong" ai "ping" e accetta una sola connessione alla volta. Può simulare i
-guasti: connessione che cade, pong che non arrivano, connessione chiusa subito dopo aver
-mandato un elemento (così l'ack si perde).
+Tiene una coda, la manda a chi si collega solo dopo il suo "hello", toglie gli elementi
+confermati con "ack", risponde "pong" ai "ping" e accetta una sola connessione alla volta. Può
+simulare i guasti: connessione che cade, pong che non arrivano, connessione chiusa subito dopo
+aver mandato un elemento (così l'ack si perde), un altro agente che prende il posto di questo
+(codice 4000), frame qualsiasi.
 """
 
 import json
@@ -27,6 +28,7 @@ class FakeWorker:
         self.answer_pings = True
         self.close_after_update = False
         self.current = None
+        self.ready = False           # la connessione corrente ha mandato hello
 
     async def start(self):
         self.server = await serve(self._handler, "127.0.0.1", 0, process_request=self._check)
@@ -52,6 +54,7 @@ class FakeWorker:
         if self.current is not None:
             await self.current.close(4000, "sostituita da una nuova connessione")
         self.current = ws
+        self.ready = False
         self.connections += 1
         try:
             async for raw in ws:
@@ -62,6 +65,7 @@ class FakeWorker:
                 msg = json.loads(raw)
                 if msg["type"] == "hello":
                     self.hellos += 1
+                    self.ready = True
                     for queue_id, update in list(self.queue):
                         await self._send(ws, queue_id, update)
                     await ws.send(json.dumps({"type": "backlog_end", "pending": len(self.queue)}))
@@ -78,7 +82,7 @@ class FakeWorker:
         queue_id = self.next_id
         self.next_id += 1
         self.queue.append((queue_id, update))
-        if self.current is not None:
+        if self.current is not None and self.ready:
             try:
                 await self._send(self.current, queue_id, update)
             except ConnectionClosed:
@@ -88,6 +92,14 @@ class FakeWorker:
     async def drop(self):
         if self.current is not None:
             await self.current.close()
+
+    async def replace(self):
+        """Un altro agente si collega: il Worker chiude questa connessione con il codice 4000."""
+        if self.current is not None:
+            await self.current.close(4000, "sostituita da una nuova connessione")
+
+    async def send_raw(self, frame):
+        await self.current.send(frame)
 
     async def _send(self, ws, queue_id, update):
         await ws.send(json.dumps({"type": "update", "id": queue_id, "update": update}))

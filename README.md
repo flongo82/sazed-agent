@@ -46,6 +46,11 @@ scripts/run.sh            # starts the agent (podman stop sazed-agent stops it)
 `python3 -m sazed_agent check` verifies configuration, secrets and journal without connecting
 to anything.
 
+Run one agent per bot. If another agent connects to the same Worker, the Worker closes this
+one's connection (code 4000) and this one stops with exit code 2 instead of fighting back: two
+agents would split your messages between two journals. To move the agent to another
+computer, stop it here first.
+
 ## How it will work
 
 | Part | How |

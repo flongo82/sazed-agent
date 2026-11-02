@@ -1,5 +1,6 @@
 """python3 -m sazed_agent check: verifica senza collegarsi e senza mostrare segreti."""
 
+import asyncio
 import contextlib
 import io
 import os
@@ -7,8 +8,10 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from sazed_agent.__main__ import AlreadyRunning, main, single_instance
+from sazed_agent.__main__ import AlreadyRunning, main, serve, single_instance
+from sazed_agent.link import Replaced
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
 
@@ -57,12 +60,38 @@ class SingleInstance(unittest.TestCase):
         with single_instance(lock):  # libero di nuovo dopo l'uscita
             pass
 
+    def test_replaced_agent_exits_with_its_own_code(self):
+        err = io.StringIO()
+        with mock.patch("sazed_agent.__main__.run", side_effect=Replaced()), contextlib.redirect_stderr(err):
+            code = main(["--config", "config.toml", "run"])  # run è finto: il file non serve
+        self.assertEqual(code, 2)
+        self.assertIn("un altro agente", err.getvalue())
+
     def test_run_without_configuration(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = main(["--config", "/nessuna/cartella/config.toml", "run"])
         self.assertEqual(code, 1)
         self.assertIn("setup.sh", err.getvalue())
+
+
+class Serve(unittest.IsolatedAsyncioTestCase):
+    async def test_replaced_link_lets_the_lanes_finish_then_propagates(self):
+        class Link:
+            async def run(self, stop):
+                raise Replaced()
+
+        class Lanes:
+            finished = False
+
+            async def run(self, stop):
+                await stop.wait()
+                self.finished = True
+
+        lanes = Lanes()
+        with self.assertRaises(Replaced):
+            await asyncio.wait_for(serve(Link(), lanes), 2)
+        self.assertTrue(lanes.finished)
 
 
 if __name__ == "__main__":

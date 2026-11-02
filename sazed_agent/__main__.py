@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from .config import ConfigError, load
 from .journal import Journal
 from .lanes import Processor, lane_for
-from .link import WorkerLink, agent_url
+from .link import Replaced, WorkerLink, agent_url
 from .telegram import Telegram
 
 log = logging.getLogger("sazed_agent")
@@ -73,14 +73,23 @@ def run(config_path):
 
 
 async def serve(link, processor, stop=None):
-    """Connessione e corsie insieme, fino a SIGTERM o SIGINT (o fino a stop, nei test)."""
+    """Connessione e corsie insieme, fino a SIGTERM o SIGINT (o fino a stop, nei test).
+
+    Se la connessione finisce da sé (un altro agente ha preso il posto di questo), le corsie
+    chiudono il lavoro in corso e l'eccezione risale.
+    """
     stop = stop or asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     log.info("agente avviato")
-    await asyncio.gather(link.run(stop), processor.run(stop))
-    log.info("agente fermato")
+    lanes = asyncio.create_task(processor.run(stop))
+    try:
+        await link.run(stop)
+    finally:
+        stop.set()
+        await lanes
+        log.info("agente fermato")
 
 
 def main(argv=None):
@@ -102,6 +111,10 @@ def main(argv=None):
     except AlreadyRunning as err:
         print(f"Già in esecuzione: {err}", file=sys.stderr)
         return 1
+    except Replaced:
+        print("Fermato: un altro agente si è collegato al Worker al posto di questo, e ne deve "
+              "girare uno solo.", file=sys.stderr)
+        return 2
     return 0
 
 

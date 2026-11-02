@@ -5,6 +5,10 @@ ogni ping_interval secondi con risposta "pong", "ack" per ogni elemento. L'ack p
 dopo che il registro ha scritto l'elemento su disco: se la scrittura fallisce non si conferma
 nulla, e il Worker lo riconsegnerà alla connessione successiva.
 
+Il Worker accetta un solo agente alla volta: se un altro si collega, chiude questa connessione
+con il codice 4000. Allora l'agente si ferma invece di ricollegarsi, perché due agenti si
+scalzerebbero a vicenda e dividerebbero i messaggi fra due registri.
+
 Se la connessione cade si riprova con attese crescenti. Se il computer si è sospeso (il tempo
 di parete è corso più di quello monotono, che durante la sospensione si ferma) si riprova
 subito, senza attese.
@@ -17,11 +21,12 @@ import random
 import time
 
 from websockets.asyncio.client import connect as ws_connect
-from websockets.exceptions import WebSocketException
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 log = logging.getLogger("sazed_agent.link")
 
 BACKOFF = (1, 2, 4, 8, 16, 32, 60)
+REPLACED = 4000  # il codice con cui il Worker chiude la connessione di un agente sostituito
 
 
 class ConnectionLost(Exception):
@@ -34,6 +39,10 @@ class PongTimeout(Exception):
 
 class Suspended(Exception):
     """Il computer si è sospeso: la connessione va rifatta subito."""
+
+
+class Replaced(Exception):
+    """Un altro agente si è collegato al Worker al posto di questo."""
 
 
 def agent_url(worker_url):
@@ -69,6 +78,9 @@ class WorkerLink:
                 log.info("ripresa dopo una sospensione: mi ricollego subito")
                 attempt = 0
                 continue
+            except Replaced:
+                log.error("un altro agente si è collegato al Worker al posto di questo: mi fermo")
+                raise
             except (OSError, WebSocketException, ConnectionLost, PongTimeout, TimeoutError) as err:
                 log.warning("connessione con il Worker persa: %s", err or type(err).__name__)
             if stop.is_set():
@@ -107,25 +119,35 @@ class WorkerLink:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _receive(self, ws):
-        async for raw in ws:
-            if raw == "pong":
-                self._last_pong = self.monotonic()
-                continue
-            try:
-                msg = json.loads(raw)
-            except ValueError:
-                log.warning("messaggio non valido dal Worker, ignorato")
-                continue
-            kind = msg.get("type")
-            if kind == "update":
-                await self._record_and_ack(ws, msg)
-            elif kind == "backlog_end":
-                self._healthy = True
-                self.worker_pending = msg.get("pending")
-                log.info("arretrato ricevuto: %s elementi", self.worker_pending)
-            elif kind == "acked":
-                self.worker_pending = msg.get("pending")
+        try:
+            async for raw in ws:
+                await self._handle(ws, raw)
+        except ConnectionClosed as err:
+            if err.rcvd is not None and err.rcvd.code == REPLACED:
+                raise Replaced() from None
+            raise
         raise ConnectionLost("il Worker ha chiuso la connessione")
+
+    async def _handle(self, ws, raw):
+        if raw == "pong":
+            self._last_pong = self.monotonic()
+            return
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            msg = None
+        if not isinstance(msg, dict):
+            log.warning("messaggio non valido dal Worker, ignorato")
+            return
+        kind = msg.get("type")
+        if kind == "update":
+            await self._record_and_ack(ws, msg)
+        elif kind == "backlog_end":
+            self._healthy = True
+            self.worker_pending = msg.get("pending")
+            log.info("arretrato ricevuto; in attesa di conferma sul Worker: %s", self.worker_pending)
+        elif kind == "acked":
+            self.worker_pending = msg.get("pending")
 
     async def _record_and_ack(self, ws, msg):
         queue_id, update = msg.get("id"), msg.get("update")
