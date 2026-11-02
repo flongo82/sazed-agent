@@ -43,7 +43,7 @@ class Catalog(unittest.TestCase):
         self.assertEqual(en["hello"]("Ada"), "Hi Ada")
         self.assertEqual(en["hello"](), "Hi")
         self.assertEqual(it["status"]("Custode", 2, 1),
-                         "l'agente Custode è collegato. Messaggi da elaborare: 2, in errore: 1.")
+                         "l'agente Custode è collegato. Messaggi da processare: 2, in errore: 1.")
         self.assertEqual(en["status"]("Custode", 2, 1),
                          "the Custode agent is connected. Messages to process: 2, failed: 1.")
         self.assertEqual(it["failed"](5),

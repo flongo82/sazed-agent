@@ -13,7 +13,9 @@ registro locale, catalogo dei testi, `setup.sh`; connessione con il Worker (regi
 dell'ack, doppioni, riconnessione, pong mancanti, sospensione del computer); corsie con
 reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Dalla quarta tappa il Worker
 passa `/stato` all'agente quando è collegato: va risposto e confermato in fretta, perché dopo
-15 s senza ack risponde il Worker. Prossime: giro completo con il vero Worker, prova MTProto.
+15 s senza ack risponde il Worker. Quinta tappa: la prova di contratto (`tests/contract.py`)
+fa girare l'agente contro il codice del Worker in `wrangler dev`; manca il giro dal telefono
+con il Worker pubblicato. Poi la prova MTProto.
 
 ## Struttura
 
@@ -26,7 +28,8 @@ passa `/stato` all'agente quando è collegato: va risposto e confermato in frett
   configurazione); il token non compare mai nei messaggi di errore
 - `sazed_agent/__main__.py`: `python3 -m sazed_agent check` e `run` (istanza unica per `data/`)
 - `tests/`: test con `unittest`, senza rete; `fake_worker.py` e `fake_telegram.py` sono un
-  finto sazed-bot e un finto Telegram, `test_flow.py` prova il giro completo
+  finto sazed-bot e un finto Telegram, `test_flow.py` prova il giro completo. `contract.py`
+  (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `Containerfile`, `scripts/`: immagine Podman, build, test, setup
 
 ## Comandi
@@ -36,6 +39,7 @@ scripts/setup.sh                   # segreti e config.toml (chiede il token del 
 scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
 scripts/test.sh                    # tutti i test nel container, senza rete
 scripts/test.sh tests.test_journal # un solo modulo di test
+scripts/contract-test.sh           # agente contro il Worker in wrangler dev (Node di ../sazed-bot)
 scripts/run.sh                     # avvia l'agente nel container (podman stop sazed-agent)
 ```
 
@@ -92,7 +96,8 @@ scripts/run.sh                     # avvia l'agente nel container (podman stop s
   nei commit. AGENT_TOKEN nasce da `scripts/setup-secrets.sh` di `sazed-bot`; come arriva qui il
   token del bot è ancora da decidere (quello script non lo salva su disco).
 - Ogni nuovo comportamento richiede un test, e i test devono passare prima di dichiarare
-  finito un lavoro. I test non dipendono da Telegram, Cloudflare o dall'API di Claude reali:
+  finito un lavoro. Se cambia il protocollo, o il modo in cui l'agente lo usa, deve passare
+  anche `scripts/contract-test.sh`. I test non dipendono da Telegram, Cloudflare o dall'API di Claude reali:
   si usano server finti, come in `sazed-bot`.
 - Costi contenuti: Haiku per classificare e interpretare; modelli più costosi o servizi a
   pagamento solo chiedendo.

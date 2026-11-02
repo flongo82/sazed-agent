@@ -22,11 +22,11 @@ journal before it is acknowledged, duplicates are recognised, and the agent reco
 itself after a dropped or hung connection or after the computer wakes up from sleep. Each
 message then gets 👀, a provisional reply and 👌; the status command answers at once, even
 while a long job is running; failed attempts are retried with growing delays, and a message
-that keeps failing is set aside with a notice, without blocking the others. Next: the Worker
-hands the status command to the agent when it is connected; then the agent starts reading
-what you send. The
-architecture, the reasons behind it and the protocol between the two parts are described in
-the README of `sazed-bot`.
+that keeps failing is set aside with a notice, without blocking the others. While the agent
+is connected the status command reaches it, and the Worker answers only for an agent that is
+off or silent. A contract test runs the agent against the real Worker code on this computer.
+Next: the agent starts reading what you send. The architecture, the reasons behind it and the
+protocol between the two parts are described in the README of `sazed-bot`.
 
 ## Getting started
 
@@ -34,11 +34,13 @@ You need `sazed-bot` already set up (its `secrets/` folder holds the agent token
 Worker's address), Podman, and your bot token.
 
 ```bash
-scripts/setup.sh     # copies the agent token and the Worker's address from ../sazed-bot,
-                     # asks for the bot token, writes config.toml
-scripts/build.sh     # builds the sazed-agent image (podman rmi sazed-agent removes it)
-scripts/test.sh      # runs the tests in the container, without network access
-scripts/run.sh       # starts the agent (podman stop sazed-agent stops it)
+scripts/setup.sh          # copies the agent token and the Worker's address from ../sazed-bot,
+                          # asks for the bot token, writes config.toml
+scripts/build.sh          # builds the sazed-agent image (podman rmi sazed-agent removes it)
+scripts/test.sh           # runs the tests in the container, without network access
+scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev, with Node and
+                          # wrangler from ../sazed-bot (read-only) and no network access
+scripts/run.sh            # starts the agent (podman stop sazed-agent stops it)
 ```
 
 `python3 -m sazed_agent check` verifies configuration, secrets and journal without connecting

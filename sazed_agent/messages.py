@@ -10,7 +10,7 @@ MESSAGES = {
         "hello": lambda first=None: f"Ciao {first}" if first else "Ciao",
         "received": "ho ricevuto il tuo messaggio: per ora lo custodisco, presto saprò leggerlo.",
         "status": lambda name, pending, failed: (
-            f"l'agente {name} è collegato. Messaggi da elaborare: {pending}, in errore: {failed}."
+            f"l'agente {name} è collegato. Messaggi da processare: {pending}, in errore: {failed}."
         ),
         "failed": lambda attempts: (
             f"non sono riuscito a elaborare questo messaggio dopo {attempts} "

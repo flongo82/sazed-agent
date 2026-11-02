@@ -22,7 +22,7 @@ class FakeTelegram:
         self._plans, self._rules, self._slow = {}, [], []
         self._next_message_id = 9000
 
-    def start(self):
+    def start(self, port=0):
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -32,7 +32,7 @@ class FakeTelegram:
             def log_message(self, *args):
                 pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.api_base = f"http://127.0.0.1:{self.server.server_port}"
         return self

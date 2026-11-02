@@ -96,7 +96,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.state(2) == "done")
         self.assertEqual(self.state(1), "read")  # l'acquisizione è ancora in corso
         self.assertEqual(self.telegram.ok_calls("sendMessage")[0][1]["text"],
-                         "Ciao Ada, l'agente Custode è collegato. Messaggi da elaborare: 1, in errore: 0.")
+                         "Ciao Ada, l'agente Custode è collegato. Messaggi da processare: 1, in errore: 0.")
         await self.until(lambda: self.state(1) == "done")
 
     async def test_transient_error_is_retried(self):
