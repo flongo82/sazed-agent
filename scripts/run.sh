@@ -17,7 +17,8 @@ mkdir -p "$AGENT_DIR/data"
 args=("$@")
 [ ${#args[@]} -gt 0 ] || args=(run)
 
-podman run --rm --name sazed-agent --replace --userns keep-id \
+# --tz local: i log con l'ora del computer, non quella UTC dell'immagine.
+podman run --rm --name sazed-agent --replace --userns keep-id --tz local \
   --volume "$AGENT_DIR/config.toml:/app/config.toml:ro" \
   --volume "$AGENT_DIR/secrets:/app/secrets:ro" \
   --volume "$AGENT_DIR/data:/app/data" \

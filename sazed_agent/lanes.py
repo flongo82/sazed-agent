@@ -103,6 +103,7 @@ class Processor:
     async def _acquire(self, entry):
         if entry.chat_id is None:  # niente a cui rispondere (per esempio un callback)
             self.journal.advance(entry.update_id, "done")
+            log.info("elemento %s completato, senza una chat a cui rispondere", entry.update_id)
             return
         state = entry.state
         if state == "received":
@@ -121,6 +122,7 @@ class Processor:
         if state == "answered":
             await self._react(entry, self.reactions.done)
             self.journal.advance(entry.update_id, "done")
+            log.info("elemento %s completato: risposta inviata", entry.update_id)
 
     async def _command(self, entry):
         if entry.reply_message_id is None:
@@ -131,6 +133,7 @@ class Processor:
             reply_id = await self.telegram.send_message(entry.chat_id, text, reply_to=entry.message_id)
             self.journal.set_reply(entry.update_id, reply_id)
         self.journal.advance(entry.update_id, "done")
+        log.info("elemento %s completato: stato inviato", entry.update_id)
 
     async def _report_failure(self, entry):
         """Avvisa una volta sola che un messaggio è stato messo da parte. Se non riesce, lo annota."""

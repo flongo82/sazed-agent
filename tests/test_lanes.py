@@ -176,6 +176,17 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.state(1) == "done")
         self.assertLess(time.monotonic() - started, 2)
 
+    async def test_each_completed_item_is_logged_without_its_text(self):
+        with self.assertLogs("sazed_agent", level="INFO") as logs:
+            p = await self.start()
+            self.record(p, update(1, text="la ricetta segreta della nonna"))
+            self.record(p, update(2, text="/stato"))
+            await self.until(lambda: self.state(1) == "done" and self.state(2) == "done")
+        joined = "\n".join(logs.output)
+        self.assertIn("elemento 1 completato: risposta inviata", joined)
+        self.assertIn("elemento 2 completato: stato inviato", joined)
+        self.assertNotIn("ricetta segreta", joined)  # il contenuto dei messaggi non va nei log
+
     async def test_token_never_appears_in_logs(self):
         self.telegram.fail("sendMessage", 500, 400)
         self.telegram.fail("setMessageReaction", 400)

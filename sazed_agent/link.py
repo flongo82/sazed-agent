@@ -122,7 +122,7 @@ class WorkerLink:
             elif kind == "backlog_end":
                 self._healthy = True
                 self.worker_pending = msg.get("pending")
-                log.info("arretrato ricevuto; in coda sul Worker: %s", self.worker_pending)
+                log.info("arretrato ricevuto: %s elementi", self.worker_pending)
             elif kind == "acked":
                 self.worker_pending = msg.get("pending")
         raise ConnectionLost("il Worker ha chiuso la connessione")

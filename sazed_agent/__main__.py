@@ -22,6 +22,10 @@ from .telegram import Telegram
 
 log = logging.getLogger("sazed_agent")
 
+# Gli stati del registro come li legge chi usa check.
+STATE_NAMES = {"received": "ricevuti", "read": "letti", "saved": "salvati", "answered": "risposti",
+               "done": "completati", "failed": "in errore"}
+
 
 class AlreadyRunning(Exception):
     """Un altro agente sta già usando la stessa cartella dei dati."""
@@ -50,7 +54,7 @@ def check(config_path):
     journal.close()
     print(f"Configurazione valida: bot \"{config.bot_name}\", lingua {config.language}.")
     print(f"Worker: {host}. Segreti presenti e protetti.")
-    print("Registro: " + ", ".join(f"{state} {n}" for state, n in counts.items()) + ".")
+    print("Registro: " + ", ".join(f"{STATE_NAMES.get(state, state)} {n}" for state, n in counts.items()) + ".")
 
 
 def run(config_path):
