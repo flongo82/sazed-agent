@@ -14,8 +14,8 @@ dell'ack, doppioni, riconnessione, pong mancanti, sospensione del computer); cor
 reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Dalla quarta tappa il Worker
 passa `/stato` all'agente quando è collegato: va risposto e confermato in fretta, perché dopo
 15 s senza ack risponde il Worker. Quinta tappa: la prova di contratto (`tests/contract.py`)
-fa girare l'agente contro il codice del Worker in `wrangler dev`; manca il giro dal telefono
-con il Worker pubblicato. Poi la prova MTProto.
+fa girare l'agente contro il codice del Worker in `wrangler dev`, e il giro dal telefono con il
+Worker pubblicato è riuscito. Prossima: la prova MTProto.
 
 ## Struttura
 
