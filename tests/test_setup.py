@@ -1,4 +1,4 @@
-"""scripts/setup.sh contro un finto Telegram e una finta cartella di sazed-bot."""
+"""scripts/setup.sh, setup-mtproto.sh e setup-claude.sh, contro finti Telegram e API di Claude."""
 
 import json
 import os
@@ -187,6 +187,130 @@ class SetupMtproto(unittest.TestCase):
     def test_setup_must_come_first(self):
         self.config.unlink()
         result = self.run_setup(f"{API_ID}\n{API_HASH}\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("run scripts/setup.sh first", result.stderr)
+
+
+KEY = "sk-ant-api03-" + "A1b2_C3d4-" * 4
+CLAUDE_CONFIG = BEFORE_MTPROTO + """
+[claude]
+api_base = "{base}"
+model = "{model}"
+"""
+
+
+class FakeClaude(BaseHTTPRequestHandler):
+    seen = []  # (percorso, chiave, versione) di ogni richiesta
+
+    def do_GET(self):
+        key, version = self.headers.get("x-api-key"), self.headers.get("anthropic-version")
+        FakeClaude.seen.append((self.path, key, version))
+        if key != KEY or not version:
+            status, body = 401, {"type": "error", "error": {"type": "authentication_error"}}
+        elif self.path == "/v1/models/claude-haiku-5-5":
+            status, body = 200, {"type": "model", "id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5"}
+        else:
+            status, body = 404, {"type": "error", "error": {"type": "not_found_error"}}
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def log_message(self, *args):
+        pass
+
+
+class SetupClaude(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeClaude)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        FakeClaude.seen.clear()
+        self.agent = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.agent)
+        (self.agent / "scripts").mkdir()
+        (self.agent / "secrets").mkdir(mode=0o700)
+        shutil.copy(ROOT / "scripts" / "setup-claude.sh", self.agent / "scripts")
+        self.config = self.agent / "config.toml"
+        self.key = self.agent / "secrets" / "anthropic_api_key"
+        self.write_config()
+
+    def write_config(self, model="claude-haiku-5-5", base=None):
+        self.config.write_text(CLAUDE_CONFIG.format(base=base or self.base, model=model))
+
+    def run_setup(self, typed, api_base=None):
+        env = {k: v for k, v in os.environ.items() if k != "SAZED_CLAUDE_API_BASE"}
+        if api_base:
+            env["SAZED_CLAUDE_API_BASE"] = api_base
+        result = subprocess.run(["bash", str(self.agent / "scripts" / "setup-claude.sh")],
+                                input=typed, capture_output=True, text=True, env=env)
+        self.assertNotIn(KEY, result.stdout + result.stderr)  # la chiave non si mostra mai
+        return result
+
+    def test_the_key_is_checked_with_the_api_then_saved(self):
+        result = self.run_setup(f" \x1b[200~{KEY}\x1b[201~\r\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("the agent will use Claude Haiku 5.5 (claude-haiku-5-5)", result.stdout)
+        self.assertEqual((self.key.read_text(), stat.S_IMODE(self.key.stat().st_mode)), (KEY, 0o600))
+        self.assertEqual(FakeClaude.seen, [("/v1/models/claude-haiku-5-5", KEY, "2023-06-01")])
+        self.assertEqual(tomllib.loads(self.config.read_text())["secrets"]["anthropic_api_key"],
+                         "secrets/anthropic_api_key")
+
+    def test_a_refused_key_is_not_saved(self):
+        result = self.run_setup("sk-ant-api03-" + "x" * 40 + "\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refused the key (401)", result.stderr)
+        self.assertFalse(self.key.exists())
+
+    def test_admin_and_malformed_keys_are_refused_before_any_call(self):
+        for typed, message in [("sk-ant-admin01-" + "x" * 40 + "\n", "Admin API key"),
+                               ("abc\n", "does not look like a Claude API key"),
+                               ("\n", "does not look like a Claude API key")]:
+            with self.subTest(typed):
+                result = self.run_setup(typed)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+        self.assertEqual(FakeClaude.seen, [])
+        self.assertFalse(self.key.exists())
+
+    def test_an_unknown_model_keeps_the_key_and_says_what_to_fix(self):
+        self.write_config(model="claude-inesistente")
+        result = self.run_setup(f"{KEY}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("does not know the model claude-inesistente", result.stderr)
+        self.assertEqual(self.key.read_text(), KEY)
+
+    def test_an_older_config_is_completed_and_without_the_api_the_key_is_kept(self):
+        self.config.write_text(BEFORE_MTPROTO)
+        result = self.run_setup(f"{KEY}\n", api_base="http://127.0.0.1:9")  # porta chiusa
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not be reached", result.stderr)
+        self.assertIn("Run this script again later", result.stderr)
+        config = tomllib.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(config["claude"], {"api_base": "https://api.anthropic.com", "model": "claude-haiku-5-5"})
+        self.assertEqual(config["secrets"]["anthropic_api_key"], "secrets/anthropic_api_key")
+        self.assertEqual(config["storage"], {"data_dir": "data"})
+        self.assertEqual(self.key.read_text(), KEY)
+
+    def test_the_example_config_and_a_second_run_stay_as_they_are(self):
+        shutil.copy(ROOT / "config.example.toml", self.config)
+        for _ in range(2):
+            result = self.run_setup(f"{KEY}\n", api_base=self.base)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("already points to them", result.stdout)
+        self.assertEqual(self.config.read_text(encoding="utf-8"),
+                         (ROOT / "config.example.toml").read_text(encoding="utf-8"))
+
+    def test_setup_must_come_first(self):
+        self.config.unlink()
+        result = self.run_setup(f"{KEY}\n")
         self.assertEqual(result.returncode, 1)
         self.assertIn("run scripts/setup.sh first", result.stderr)
 

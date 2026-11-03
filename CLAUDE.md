@@ -44,12 +44,15 @@ Claude (Haiku) per intenzione e classificazione, poi le domande con strumenti di
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
 - `Containerfile`, `scripts/`: immagine Podman, build, test, setup
+- `pip-requirements.txt`: ciò che apt non ha, con versione e hash (oggi solo `jiter`, che
+  `python3-anthropic` di Ubuntu importa senza dichiararlo)
 
 ## Comandi
 
 ```bash
 scripts/setup.sh                   # segreti e config.toml (chiede il token del bot)
 scripts/setup-mtproto.sh           # api_id e api_hash da my.telegram.org, secrets/mtproto/
+scripts/setup-claude.sh            # chiave API di Claude (provata con l'API), sezione [claude]
 scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
 scripts/test.sh                    # tutti i test nel container, senza rete
 scripts/test.sh tests.test_journal # un solo modulo di test
@@ -110,15 +113,17 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   "en"). Le risposte del modello seguono la stessa lingua. Il nome dell'utente arriva da
   Telegram, mai scritto nel codice o nei test.
 - L'agente gira in un container Podman senza root. Le dipendenze stanno nell'immagine
-  (Ubuntu 26.04, pacchetti apt; pip solo per ciò che apt non ha); dal computer arrivano solo
-  le cartelle montate: `data/` (database e log), `secrets/`, la configurazione, e più avanti
-  `.cache/` per i modelli. Codice e test girano nel container.
+  (Ubuntu 26.04, pacchetti apt; pip solo per ciò che apt non ha, in `pip-requirements.txt` con
+  versione fissa uscita da qualche settimana, hash e `--no-deps`; pip non resta nell'immagine);
+  dal computer arrivano solo le cartelle montate: `data/` (database e log), `secrets/`, la
+  configurazione, e più avanti `.cache/` per i modelli. Codice e test girano nel container.
 - Ogni installazione sul computer richiede il permesso esplicito dell'utente: Podman, il
   toolkit di NVIDIA per la GPU, ma anche il download di immagini e modelli.
 - Segreti (AGENT_TOKEN, token del bot, chiave API di Anthropic, `api_id` e `api_hash`, cookie
   di Instagram) solo in `secrets/`, con permessi 700: mai nel codice, nei test, nei log o
   nei commit. AGENT_TOKEN nasce da `scripts/setup-secrets.sh` di `sazed-bot`, il token del bot
-  lo chiede `scripts/setup.sh`. Via MTProto l'agente entra solo con il token
+  lo chiede `scripts/setup.sh`, la chiave di Claude `scripts/setup-claude.sh` (che la prova con
+  l'API prima di salvarla e rifiuta le chiavi Admin). Via MTProto l'agente entra solo con il token
   del bot (`receive_updates=False`, per non togliere aggiornamenti al webhook), mai con
   l'account dell'utente; la sua sessione è l'unico segreto che scrive, in `secrets/mtproto/`,
   la sola parte di `secrets/` montata in scrittura.
@@ -127,6 +132,7 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   anche `scripts/contract-test.sh`. I test non dipendono da Telegram, Cloudflare o dall'API di Claude reali:
   si usano server finti, come in `sazed-bot`.
 - Costi contenuti: Haiku per classificare e interpretare; modelli più costosi o servizi a
-  pagamento solo chiedendo.
+  pagamento solo chiedendo. Il modello sta in `config.toml` (`[claude] model`), mai nel codice:
+  la chiave non è legata a un modello.
 - I messaggi del bot sono brevi e chiari, con la voce pacata di un Custode, e seguono lo
   stile di `sazed-bot`: saluto per nome, poi il fatto ("Ciao <nome>, …").

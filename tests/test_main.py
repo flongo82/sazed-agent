@@ -39,6 +39,8 @@ class Check(unittest.TestCase):
         self.assertIn("Worker: w.example", out)
         self.assertIn("Registro: ricevuti 0, letti 0, salvati 0, risposti 0, completati 0, in errore 0.", out)
         self.assertIn("coppermind: 0 elementi.", out)
+        self.assertIn("Claude: non ancora pronto (", out)  # senza chiave l'agente lavora lo stesso
+        self.assertIn("setup-claude.sh", out)
         self.assertTrue((self.dir / "data" / "coppermind.db").exists())
         self.assertNotIn("SEGRETO", out)
 

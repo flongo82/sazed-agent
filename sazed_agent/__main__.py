@@ -59,6 +59,11 @@ def check(config_path):
     print(f"Worker: {host}. Segreti presenti e protetti.")
     print("Registro: " + ", ".join(f"{STATE_NAMES.get(state, state)} {n}" for state, n in counts.items()) + ".")
     print(f"coppermind: {kept} {'elemento' if kept == 1 else 'elementi'}.")
+    try:  # Claude non serve ancora per elaborare i messaggi: se manca, check lo dice e basta
+        config.anthropic_api_key
+        print(f"Claude: modello {config.claude.model}, chiave presente e protetta.")
+    except ConfigError as err:
+        print(f"Claude: non ancora pronto ({err}).")
 
 
 def run(config_path):

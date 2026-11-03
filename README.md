@@ -50,6 +50,8 @@ scripts/setup.sh          # copies the agent token and the Worker's address from
                           # asks for the bot token, writes config.toml
 scripts/setup-mtproto.sh  # asks for the api_id and api_hash of an application created on
                           # my.telegram.org, to download files beyond the Bot API's 20 MB
+scripts/setup-claude.sh   # asks for a Claude API key from the Claude Console, checks it with
+                          # the API and saves it; the model is chosen in config.toml
 scripts/build.sh          # builds the sazed-agent image (podman rmi sazed-agent removes it)
 scripts/test.sh           # runs the tests in the container, without network access
 scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev, with Node and
@@ -63,8 +65,14 @@ Through MTProto the agent logs in with the bot token, never with your account: `
 `api_hash` only identify the application. Its session is the one secret the agent writes, in
 `secrets/mtproto/`, the only part of `secrets/` mounted writable.
 
+An API key is not tied to a model: the agent names the model on every request, from the
+`[claude]` section of `config.toml` (Claude Haiku by default, the cheapest, which is plenty
+for telling notes from questions and classifying what you save). The key comes from the Claude
+Console, which bills separately from a claude.ai subscription; some plans include monthly API
+credits for it. Create a key used only by this agent, so that you can revoke it on its own.
+
 `python3 -m sazed_agent check` verifies configuration, secrets, journal and coppermind without
-connecting to anything.
+connecting to anything, and says whether Claude is ready.
 
 Run one agent per bot. If another agent connects to the same Worker, the Worker closes this
 one's connection (code 4000) and this one stops with exit code 2 instead of fighting back: two
@@ -93,7 +101,8 @@ sazed is the name of the software. Your bot's name, its username and the name it
 itself with are yours to choose, and none of them will live in this repository: personal
 values and secrets stay in files that git ignores.
 
-The agent runs in a rootless Podman container: everything it needs lives in the image, and
+The agent runs in a rootless Podman container: everything it needs lives in the image (Ubuntu
+packages, plus the few that apt lacks, pinned with their hashes in `pip-requirements.txt`), and
 your computer only needs Podman (plus NVIDIA's container toolkit once transcription uses the
 GPU). Moving the agent to another computer means copying this folder, with its `data/` and
 `secrets/`, and starting the container there.

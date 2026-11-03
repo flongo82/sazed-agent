@@ -13,6 +13,7 @@ from .messages import MESSAGES
 
 
 MTPROTO_SETUP = "scripts/setup-mtproto.sh"
+CLAUDE_SETUP = "scripts/setup-claude.sh"
 
 
 class ConfigError(Exception):
@@ -27,6 +28,12 @@ class Reactions:
 
 
 @dataclass(frozen=True)
+class Claude:
+    api_base: str
+    model: str     # il modello si sceglie qui, a ogni richiesta: la chiave vale per tutti
+
+
+@dataclass(frozen=True)
 class Config:
     root: Path
     bot_name: str
@@ -38,6 +45,8 @@ class Config:
     api_id_file: Path | None      # MTProto, per i file oltre i 20 MB: scripts/setup-mtproto.sh
     api_hash_file: Path | None
     mtproto_dir: Path | None      # la sessione MTProto del bot, l'unico segreto che si scrive
+    anthropic_api_key_file: Path | None  # la chiave dell'API di Claude: scripts/setup-claude.sh
+    claude_settings: Claude | None       # [claude]: scripts/setup-claude.sh
     telegram_api_base: str
     reactions: Reactions
     ping_interval: float
@@ -62,18 +71,28 @@ class Config:
 
     @property
     def api_id(self):
-        value = _secret(_mtproto(self.api_id_file, "api_id"), MTPROTO_SETUP)
+        value = _secret(_configured(self.api_id_file, "api_id", MTPROTO_SETUP), MTPROTO_SETUP)
         if not value.isdigit():
             raise ConfigError(f"{self.api_id_file} non contiene un api_id: lancia {MTPROTO_SETUP}")
         return int(value)
 
     @property
     def api_hash(self):
-        return _secret(_mtproto(self.api_hash_file, "api_hash"), MTPROTO_SETUP)
+        return _secret(_configured(self.api_hash_file, "api_hash", MTPROTO_SETUP), MTPROTO_SETUP)
 
     @property
     def mtproto_session_file(self):
-        return _mtproto(self.mtproto_dir, "mtproto_dir") / "session"
+        return _configured(self.mtproto_dir, "mtproto_dir", MTPROTO_SETUP) / "session"
+
+    @property
+    def anthropic_api_key(self):
+        return _secret(_configured(self.anthropic_api_key_file, "anthropic_api_key", CLAUDE_SETUP), CLAUDE_SETUP)
+
+    @property
+    def claude(self):
+        if self.claude_settings is None:
+            raise ConfigError(f"[claude] manca in config.toml: lancia {CLAUDE_SETUP}")
+        return self.claude_settings
 
 
 def load(path):
@@ -89,6 +108,7 @@ def load(path):
     section = lambda name: _table(raw, name)
     secrets, storage, telegram = section("secrets"), section("storage"), section("telegram")
     reactions, connection, retries = section("reactions"), section("connection"), section("retries")
+    claude = section("claude") if "claude" in raw else None
 
     language = _text(raw, "language").lower()
     if language != "auto" and language not in MESSAGES:
@@ -112,6 +132,9 @@ def load(path):
         api_id_file=_optional_path(root, secrets, "api_id"),
         api_hash_file=_optional_path(root, secrets, "api_hash"),
         mtproto_dir=_optional_path(root, secrets, "mtproto_dir"),
+        anthropic_api_key_file=_optional_path(root, secrets, "anthropic_api_key"),
+        claude_settings=None if claude is None else Claude(
+            api_base=_text(claude, "api_base", "claude.").rstrip("/"), model=_text(claude, "model", "claude.")),
         telegram_api_base=_text(telegram, "api_base", "telegram.").rstrip("/"),
         reactions=Reactions(
             received=_text(reactions, "received", "reactions."),
@@ -139,13 +162,14 @@ def _text(table, key, prefix=""):
 
 
 def _optional_path(root, secrets, key):
-    """Un percorso di [secrets] che può mancare: config.toml di prima di MTProto non lo ha."""
+    """Un percorso di [secrets] che può mancare: un config.toml di prima di MTProto o di Claude
+    non lo ha."""
     return root / _text(secrets, key, "secrets.") if key in secrets else None
 
 
-def _mtproto(path, key):
+def _configured(path, key, setup):
     if path is None:
-        raise ConfigError(f"secrets.{key} manca in config.toml: lancia {MTPROTO_SETUP}")
+        raise ConfigError(f"secrets.{key} manca in config.toml: lancia {setup}")
     return path
 
 

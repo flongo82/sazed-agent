@@ -98,6 +98,29 @@ class Config(unittest.TestCase):
             with self.subTest(name), self.assertRaisesRegex(ConfigError, "manca in config.toml.*setup-mtproto.sh"):
                 getattr(config, name)
 
+    def test_claude_settings_and_key(self):
+        self.secret("anthropic_api_key", " sk-ant-api03-prova\n")
+        config = load(self.path)
+        self.assertEqual((config.claude.api_base, config.claude.model),
+                         ("https://api.anthropic.com", "claude-haiku-5-5"))
+        self.assertEqual(config.anthropic_api_key, "sk-ant-api03-prova")
+
+    def test_missing_claude_key_points_to_its_setup(self):
+        with self.assertRaisesRegex(ConfigError, "anthropic_api_key non esiste: lancia scripts/setup-claude.sh"):
+            load(self.path).anthropic_api_key
+
+    def test_config_from_before_claude_still_works_and_points_to_its_setup(self):
+        text = self.path.read_text(encoding="utf-8")
+        text = text[:text.index("# Claude, through its API.")] + text[text.index("# Reactions"):]
+        self.path.write_text("\n".join(l for l in text.splitlines() if not l.startswith("anthropic_api_key"))
+                             + "\n", encoding="utf-8")
+        config = load(self.path)
+        self.assertEqual(config.bot_token, "123:ABC")
+        with self.assertRaisesRegex(ConfigError, "secrets.anthropic_api_key manca in config.toml.*setup-claude.sh"):
+            config.anthropic_api_key
+        with self.assertRaisesRegex(ConfigError, r"\[claude\] manca in config.toml.*setup-claude.sh"):
+            config.claude
+
     def test_invalid_values(self):
         cases = [
             ('language = "auto"', 'language = "fr"', "language"),
@@ -105,6 +128,7 @@ class Config(unittest.TestCase):
             ("ping_interval = 30", "ping_interval = 0", "ping_interval"),
             ('received = "👀"', 'received = ""', "reactions.received"),
             ("pong_timeout = 10", "pong_timeout = 30", "minore di connection.ping_interval"),
+            ('model = "claude-haiku-5-5"', 'model = ""', "claude.model"),
         ]
         for old, new, message in cases:
             with self.subTest(new):
