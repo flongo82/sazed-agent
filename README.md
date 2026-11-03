@@ -19,15 +19,26 @@ Being built. Done so far: configuration, the local journal of incoming messages 
 idempotent, with states that only move forward and limited retries), the text catalog in
 Italian and English, and the connection with `sazed-bot`: every message is written to the
 journal before it is acknowledged, duplicates are recognised, and the agent reconnects by
-itself after a dropped or hung connection or after the computer wakes up from sleep. Each
-message then gets 👀, a provisional reply and 👌; the status command answers at once, even
-while a long job is running; failed attempts are retried with growing delays, and a message
-that keeps failing is set aside with a notice, without blocking the others. While the agent
-is connected the status command reaches it, and the Worker answers only for an agent that is
-off or silent. A contract test runs the agent against the real Worker code on this computer, and a probe
-has shown that the bot downloads through MTProto files beyond the Bot API's 20 MB while the
-webhook keeps working. Next: the agent starts reading what you send. The architecture, the reasons behind it and the
-protocol between the two parts are described in the README of `sazed-bot`.
+itself after a dropped or hung connection or after the computer wakes up from sleep. The
+status command answers at once, even while a long job is running; failed attempts are retried
+with growing delays, and a message that keeps failing is set aside with a notice, without
+blocking the others. While the agent is connected the status command reaches it, and the
+Worker answers only for an agent that is off or silent. A contract test runs the agent against
+the real Worker code on this computer, and a probe has shown that the bot downloads through
+MTProto files beyond the Bot API's 20 MB while the webhook keeps working.
+
+Every message now ends up in coppermind: it gets 👀, is saved, then gets a reply and 👌. A note
+is kept as written; every link becomes an item of its own, with its platform (YouTube,
+Instagram, TikTok…), its site and the words around it as a note; photos, videos, voice
+messages, audio and documents are kept as references to their message in the chat. The same
+link or file sent twice stays one item, and an edited message updates its items. The reply
+("I saved the link") is written by the code after the commit, never before. Searches already
+work: complete lists with exact filters (type, platform, site, kind of input, dates) and
+full-text search that ignores accents and matches word beginnings.
+
+Next: Claude tells notes from questions, classifies what is saved and answers from coppermind;
+then the agent starts reading pages, videos and files. The architecture, the reasons behind it
+and the protocol between the two parts are described in the README of `sazed-bot`.
 
 ## Getting started
 
@@ -52,8 +63,8 @@ Through MTProto the agent logs in with the bot token, never with your account: `
 `api_hash` only identify the application. Its session is the one secret the agent writes, in
 `secrets/mtproto/`, the only part of `secrets/` mounted writable.
 
-`python3 -m sazed_agent check` verifies configuration, secrets and journal without connecting
-to anything.
+`python3 -m sazed_agent check` verifies configuration, secrets, journal and coppermind without
+connecting to anything.
 
 Run one agent per bot. If another agent connects to the same Worker, the Worker closes this
 one's connection (code 4000) and this one stops with exit code 2 instead of fighting back: two
@@ -71,7 +82,7 @@ computer, stop it here first.
 | Pages and documents | Main-text extraction; MarkItDown and Docling for PDFs and documents |
 | Photos | OCR; place and date of the shot from EXIF, with reverse geocoding on OpenStreetMap |
 | Large files | Download through MTProto, up to 2 GB |
-| coppermind | A single SQLite file, with full-text and semantic search |
+| coppermind | A single SQLite file, shared with the journal so that saving an item and moving its message forward are one transaction: exact filters, full-text search (FTS5), and semantic search with embeddings computed on the GPU |
 
 Only links, metadata and extracted text are kept: the sources stay where they are, and your
 files stay in the Telegram chat, which coppermind points back to.

@@ -4,14 +4,24 @@ Annota ogni chiamata con il suo esito e risponde come Telegram. Si può farlo fa
 - fail(method, status, ...): i prossimi tentativi di quel metodo falliscono con quegli stati;
 - rule(funzione): per ogni chiamata, la funzione può restituire uno stato di errore;
 - slow(funzione, secondi): le chiamate per cui la funzione è vera rispondono in ritardo.
+
+url_entities(testo) dà le entità che Telegram aggiunge ai link di un messaggio.
 """
 
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = "123:TEST-TOKEN"
+
+
+def url_entities(text):
+    """Le entità "url" di Telegram per i link http(s) di un testo, con le posizioni in UTF-16."""
+    units = lambda s: len(s.encode("utf-16-le")) // 2
+    return [{"type": "url", "offset": units(text[:m.start()]), "length": units(m.group())}
+            for m in re.finditer(r"https?://\S+", text)]
 
 
 class FakeTelegram:

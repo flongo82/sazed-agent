@@ -8,24 +8,32 @@ il Worker è nel README di `../sazed-bot`.
 
 ## Stato
 
-Primo passo completato (`architettura.md`, capitolo 7, punto 4.1). Fatte le prime tre tappe:
-configurazione, registro locale, catalogo dei testi, `setup.sh`; connessione con il Worker
-(registro prima dell'ack, doppioni, riconnessione, pong mancanti, sospensione del computer);
-corsie con reazioni, risposta provvisoria, `/stato`, tentativi ed errori. Dalla quarta tappa il
-Worker passa `/stato` all'agente quando è collegato: va risposto e confermato in fretta, perché
-dopo 15 s senza ack risponde il Worker. Quinta tappa: la prova di contratto
-(`tests/contract.py`) fa girare l'agente contro il codice del Worker in `wrangler dev`, e il
-giro dal telefono con il Worker pubblicato è riuscito. Sesta tappa: la prova MTProto
-(`spikes/mtproto.py`) ha mostrato che il bot scarica via MTProto un file oltre i 20 MB mentre
-il webhook continua a funzionare (1,1 MB/s, una richiesta alla volta). Prossimo passo:
-coppermind, con salvataggio e ricerca.
+Passo 4.1 completato (`architettura.md`, capitolo 7): configurazione, registro locale, catalogo
+dei testi, `setup.sh`; connessione con il Worker (registro prima dell'ack, doppioni,
+riconnessione, pong mancanti, sospensione del computer); corsie con reazioni, `/stato`,
+tentativi ed errori; `/stato` passato dal Worker all'agente quando è collegato (va risposto e
+confermato in fretta: dopo 15 s senza ack risponde il Worker); prova di contratto
+(`tests/contract.py`) e giro dal telefono con il Worker pubblicato; prova MTProto
+(`spikes/mtproto.py`: un file oltre i 20 MB scaricato con il webhook attivo, 1,1 MB/s).
+
+Passo 4.2, prima parte fatta: coppermind con catalogo, salvataggio idempotente nella stessa
+transazione del cambio di stato, ricerca con filtri esatti e testo (FTS5); note, link e
+riferimenti ai file salvati davvero, con la risposta scritta dopo il commit. Prossima parte:
+Claude (Haiku) per intenzione e classificazione, poi le domande con strumenti di sola lettura.
 
 ## Struttura
 
 - `sazed_agent/config.py`: `config.toml` e segreti (letti solo quando servono, mai mostrati)
-- `sazed_agent/journal.py`: registro locale in `data/coppermind.db` (WAL, synchronous=FULL)
+- `sazed_agent/coppermind.py`: la memoria, in `data/coppermind.db` (WAL, synchronous=FULL):
+  elementi, link riconosciuti (`parse_link`), salvataggio, ricerca. Non importa nulla dal resto
+  dell'agente
+- `sazed_agent/journal.py`: registro locale degli ingressi, sulla stessa connessione di
+  coppermind
+- `sazed_agent/intake.py`: da un messaggio Telegram agli elementi da salvare (note, link dalle
+  entità in UTF-16, file), più i comandi sconosciuti
 - `sazed_agent/messages.py`: tutti i testi per l'utente, in italiano e inglese
-- `sazed_agent/lanes.py`: le due corsie (comandi, acquisizione), stati, tentativi, reazioni
+- `sazed_agent/lanes.py`: le due corsie (comandi, acquisizione), stati, tentativi, reazioni,
+  e la risposta al salvataggio (`acquired_text`)
 - `sazed_agent/link.py`: connessione WebSocket con il Worker, ack, riconnessioni
 - `sazed_agent/telegram.py`: chiamate all'API dei bot ed errori (definitivi, da riprovare, di
   configurazione); il token non compare mai nei messaggi di errore
@@ -81,7 +89,13 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   "fonte non disponibile".
 - Niente archivio delle fonti: si salvano link, metadati e testo estratto. Audio e file
   scaricati per l'elaborazione si cancellano subito dopo, anche quando l'elaborazione fallisce.
-- coppermind è un modulo con una sua interfaccia, indipendente dal motore dell'agente.
+- coppermind è un modulo con una sua interfaccia, indipendente dal motore dell'agente: non
+  importa nulla da `sazed_agent`, e di Telegram conosce solo i riferimenti (chat_id,
+  message_id). Un elemento per nota, per link, per file; lo stesso link o file resta un
+  elemento solo. Ogni cambio di schema alza `VERSION` (`PRAGMA user_version`) con la sua
+  migrazione e il suo test, e un database più recente del codice si rifiuta.
+- La risposta al salvataggio si costruisce da ciò che coppermind contiene dopo il commit
+  (`outcomes`), mai da ciò che si voleva salvare: dopo un arresto è la stessa.
 - Backup del database a caldo con l'API di backup di SQLite, mai copiando il file in uso.
 - Nominatim: al massimo una richiesta al secondo, con un User-Agent esplicito.
 - Il repository è pubblico: niente che permetta di raggiungere un'istanza (indirizzo del

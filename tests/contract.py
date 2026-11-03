@@ -4,8 +4,8 @@ Gira nel container, senza rete (scripts/contract-test.sh): wrangler dev esegue i
 Worker, due finti Telegram rispondono uno al Worker e uno all'agente, e l'agente parte come in
 produzione (python3 -m sazed_agent run) con una configurazione ricavata da config.example.toml.
 Prova il protocollo da un capo all'altro: arretrato (consegnato a passi, con una finestra di 2),
-ack, messaggi con l'agente collegato, /stato all'agente, doppioni, arresto ordinato e brusco,
-e un secondo agente che prende il posto del primo.
+ack, messaggi con l'agente collegato (salvati in coppermind), /stato all'agente, doppioni,
+arresto ordinato e brusco, e un secondo agente che prende il posto del primo.
 
 Non è nella scoperta di unittest (scripts/test.sh): serve sazed-bot, con Node e node_modules.
 """
@@ -24,7 +24,7 @@ import urllib.request
 from pathlib import Path
 
 from sazed_agent.messages import messages_for
-from tests.fake_telegram import FakeTelegram
+from tests.fake_telegram import FakeTelegram, url_entities
 
 BOT = Path(os.environ.get("SAZED_BOT_DIR", "/bot"))  # parti di sazed-bot montate in sola lettura
 PORT = 8797
@@ -63,6 +63,8 @@ def message(text, lang="it"):
            "chat": {"id": USER, "type": "private", "first_name": FIRST_NAME}}
     if text.startswith("/"):
         msg["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
+    elif url_entities(text):
+        msg["entities"] = url_entities(text)
     return {"update_id": uid, "message": msg}
 
 
@@ -234,8 +236,8 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
     agent.start()
     wait_until(lambda: "👌" in reactions(tg_agent, first), 30)
     check("reazioni 👀 e poi 👌", reactions(tg_agent, first) == ["👀", "👌"], reactions(tg_agent, first))
-    check("una sola risposta, in risposta al messaggio",
-          replies(tg_agent, first) == [f"{hello_it}, {it['received']}"], replies(tg_agent, first))
+    check("una sola risposta, in risposta al messaggio: la nota è salvata",
+          replies(tg_agent, first) == [f"{hello_it}, {it['saved'](it['note'])}"], replies(tg_agent, first))
     check("\"sta scrivendo...\" durante l'elaborazione",
           any(p["action"] == "typing" for _, p in tg_agent.ok_calls("sendChatAction")))
     check("il /stato di prima non arriva all'agente", replies(tg_agent, status) == [])
@@ -245,12 +247,15 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
     link = message("https://example.org/risotto")
     post(link)
     wait_until(lambda: "👌" in reactions(tg_agent, link))
-    check("un link arriva subito all'agente, che risponde", len(replies(tg_agent, link)) == 1)
+    check("un link arriva subito all'agente, che lo salva e risponde",
+          replies(tg_agent, link) == [f"{hello_it}, {it['saved'](it['link']())} {it['later'].capitalize()}"],
+          replies(tg_agent, link))
     check("il Worker non dice nulla", replies(tg_worker, link) == [])
     status = message("/stato")
     post(status)
     text = (wait_until(lambda: replies(tg_agent, status)) or [""])[0]
-    check("/stato passa all'agente, che risponde", text == f"{hello_it}, {it['status'](BOT_NAME, 0, 0)}", text)
+    check("/stato passa all'agente, che risponde e conta la nota e il link custoditi",
+          text == f"{hello_it}, {it['status'](BOT_NAME, 0, 0, 2)}", text)
     check("nessuna risposta di riserva dal Worker dopo l'attesa", quiet(tg_worker, 2.5) == 0)
     post(link)  # Telegram può riconsegnare un aggiornamento già consegnato
     check("un doppione non ha una seconda risposta", quiet(tg_agent, 2) == 0 and len(replies(tg_agent, link)) == 1)
@@ -258,7 +263,7 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
     post(english)
     wait_until(lambda: replies(tg_agent, english))
     check("con l'app in inglese l'agente risponde in inglese",
-          replies(tg_agent, english) == [f"{hello_en}, {en['received']}"], replies(tg_agent, english))
+          replies(tg_agent, english) == [f"{hello_en}, {en['saved'](en['note'])}"], replies(tg_agent, english))
 
     print("\n# Fase 4: arresto ordinato")
     check("l'agente si ferma con SIGTERM", agent.stop() == 0)

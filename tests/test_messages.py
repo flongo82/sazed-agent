@@ -6,6 +6,9 @@ import unittest
 
 from sazed_agent.messages import MESSAGES, STATUS_COMMANDS, messages_for
 
+# Argomenti di prova per i testi che non accettano una stringa qualunque.
+SAMPLES = {"date": (3, 11)}
+
 
 def shape(block):
     """Chiavi e tipi di un blocco; per le funzioni anche il numero di argomenti obbligatori."""
@@ -27,7 +30,10 @@ class Catalog(unittest.TestCase):
     def test_every_text_is_a_full_string(self):
         for lang, block in MESSAGES.items():
             for key, value in block.items():
-                text = value(*["x"] * shape(block)[key][1]) if callable(value) else value
+                if callable(value):
+                    text = value(*SAMPLES.get(key, ["x"] * shape(block)[key][1]))
+                else:
+                    text = value
                 self.assertIsInstance(text, str, f"{lang}.{key}")
                 self.assertTrue(text and "None" not in text, f"{lang}.{key}: {text!r}")
 
@@ -42,10 +48,17 @@ class Catalog(unittest.TestCase):
         self.assertEqual(it["hello"](), "Ciao")
         self.assertEqual(en["hello"]("Ada"), "Hi Ada")
         self.assertEqual(en["hello"](), "Hi")
-        self.assertEqual(it["status"]("Custode", 2, 1),
-                         "l'agente Custode è collegato. Messaggi da processare: 2, in errore: 1.")
-        self.assertEqual(en["status"]("Custode", 2, 1),
-                         "the Custode agent is connected. Messages to process: 2, failed: 1.")
+        self.assertEqual(it["status"]("Custode", 2, 1, 40),
+                         "l'agente Custode è collegato. Messaggi da processare: 2, in errore: 1. "
+                         "Elementi custoditi: 40.")
+        self.assertEqual(en["status"]("Custode", 2, 1, 40),
+                         "the Custode agent is connected. Messages to process: 2, failed: 1. Items kept: 40.")
+        self.assertEqual(it["saved"](it["file"]("photo") + it["and"] + it["link"]("YouTube")),
+                         "ho salvato la foto e il link di YouTube.")
+        self.assertEqual(en["saved"](en["links"](3)), "I saved the 3 links.")
+        self.assertEqual((it["date"](3, 11), it["date"](1, 1, 2025)), ("3 novembre", "1 gennaio 2025"))
+        self.assertEqual((en["date"](3, 11), en["date"](31, 12, 2025)), ("3 November", "31 December 2025"))
+        self.assertEqual((it["file"]("sconosciuto"), en["file"]("unknown")), ("il file", "the file"))
         self.assertEqual(it["failed"](5),
                          "non sono riuscito a elaborare questo messaggio dopo 5 tentativi: lo tengo da parte.")
 

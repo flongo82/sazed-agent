@@ -125,6 +125,18 @@ class JournalTest(unittest.TestCase):
         counts = self.journal.counts()
         self.assertEqual((counts["received"], counts["done"], counts["failed"], counts["read"]), (1, 1, 1, 0))
 
+    def test_nested_transactions_belong_to_the_outer_one(self):
+        self.journal.record(1, update(1), "acquisition")
+        with self.assertRaises(JournalError):
+            with self.journal.transaction():
+                self.journal.advance(1, "read")     # dentro: non ancora confermato
+                self.journal.advance(1, "received")  # all'indietro: errore, si annulla tutto
+        self.assertEqual(self.journal.get(1).state, "received")
+        with self.journal.transaction():
+            self.journal.advance(1, "read")
+        self.assertEqual(self.journal.get(1).state, "read")
+        self.assertFalse(self.journal.db.in_transaction)
+
     def test_unknown_item(self):
         with self.assertRaisesRegex(JournalError, "non è nel registro"):
             self.journal.advance(999, "read")

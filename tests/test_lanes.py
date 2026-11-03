@@ -1,4 +1,4 @@
-"""Le corsie: reazioni, risposta provvisoria, /stato, tentativi, errori, ripresa dopo un arresto."""
+"""Le corsie: reazioni, salvataggio e risposta, /stato, tentativi, errori, ripresa dopo un arresto."""
 
 import asyncio
 import logging
@@ -8,19 +8,28 @@ import time
 import unittest
 from pathlib import Path
 
+from sazed_agent import intake
 from sazed_agent.config import Reactions
+from sazed_agent.coppermind import Coppermind, Draft, Item, Outcome
 from sazed_agent.journal import Journal
-from sazed_agent.lanes import Processor, lane_for
+from sazed_agent.lanes import Processor, acquired_text, lane_for
+from sazed_agent.messages import messages_for
 from sazed_agent.telegram import Telegram, TelegramError
-from tests.fake_telegram import TOKEN, FakeTelegram
+from tests.fake_telegram import TOKEN, FakeTelegram, url_entities
 
-RECEIVED_IT = "Ciao Ada, ho ricevuto il tuo messaggio: per ora lo custodisco, presto saprò leggerlo."
+SAVED_LINK_IT = "Ciao Ada, ho salvato il link. Il contenuto lo leggerò più avanti."
+PI_DAY_2025 = 1_741_953_600  # 14 marzo 2025, mezzogiorno UTC
 
 
-def update(update_id, text="https://example.com/ricetta", lang="it"):
-    return {"update_id": update_id,
-            "message": {"message_id": update_id * 10, "chat": {"id": 42, "type": "private"},
-                        "from": {"id": 42, "first_name": "Ada", "language_code": lang}, "text": text}}
+def update(update_id, text=None, lang="it", edited=False, **fields):
+    """Un messaggio di Ada; senza testo né altri campi, un link diverso per ogni update_id."""
+    if text is None and not fields:
+        text = f"https://example.com/ricetta/{update_id}"
+    msg = {"message_id": update_id * 10, "chat": {"id": 42, "type": "private"},
+           "from": {"id": 42, "first_name": "Ada", "language_code": lang}, **fields}
+    if text is not None:
+        msg.update(text=text, entities=url_entities(text))
+    return {"update_id": update_id, "edited_message" if edited else "message": msg}
 
 
 def text_has(fragment):
@@ -35,12 +44,13 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.telegram.stop)
         self.journal = Journal(self.dir / "coppermind.db")
         self.addCleanup(self.journal.close)
+        self.memory = Coppermind(self.journal.db)
         self.stop = asyncio.Event()
 
     def processor(self, token=TOKEN, delays=(0.05, 0.1)):
         return Processor(self.journal, Telegram(self.telegram.api_base, token, timeout=5), "Custode", "auto",
                          Reactions("👀", "👌", "😢"), delays, typing_interval=0.05, idle_wait=5.0,
-                         config_pause=30.0)
+                         config_pause=30.0, memory=self.memory)
 
     async def start(self, processor=None):
         processor = processor or self.processor()
@@ -67,7 +77,18 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
     def state(self, update_id):
         return self.journal.get(update_id).state
 
-    async def test_message_gets_reactions_and_a_provisional_reply(self):
+    def replies(self):
+        return [prm["text"] for _, prm in self.telegram.ok_calls("sendMessage")]
+
+    async def answer(self, *updates):
+        """Elabora i messaggi uno dopo l'altro e restituisce le risposte, nello stesso ordine."""
+        p = await self.start()
+        for upd in updates:
+            self.record(p, upd)
+            await self.until(lambda: self.state(upd["update_id"]) == "done")
+        return self.replies()
+
+    async def test_a_link_is_saved_then_answered_with_reactions(self):
         p = await self.start()
         self.record(p, update(1))
         await self.until(lambda: self.state(1) == "done")
@@ -76,27 +97,75 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         reactions = [c[1]["reaction"][0]["emoji"] for c in self.telegram.ok_calls("setMessageReaction")]
         self.assertEqual(reactions, ["👀", "👌"])
         _, sent = self.telegram.ok_calls("sendMessage")[0]
-        self.assertEqual(sent["text"], RECEIVED_IT)
+        self.assertEqual(sent["text"], SAVED_LINK_IT)
         self.assertEqual(sent["reply_parameters"]["message_id"], 10)
         self.assertEqual(self.journal.get(1).reply_message_id, 9000)
+        [item] = self.memory.of_message(42, 10)
+        self.assertEqual((item.url, item.platform, item.extraction), ("https://example.com/ricetta/1", "web", "pending"))
 
     async def test_english_user_gets_english_texts(self):
-        p = await self.start()
-        self.record(p, update(1, lang="en"))
+        self.assertEqual(await self.answer(update(1, lang="en")), ["Hi Ada, I saved the link. I'll read its content later."])
+
+    async def test_a_note_is_saved_as_written(self):
+        replies = await self.answer(update(1, "riso carnaroli\nda comprare"))
+        self.assertEqual(replies, ["Ciao Ada, ho salvato la tua nota."])
+        self.assertEqual(self.memory.of_message(42, 10)[0].note, "riso carnaroli\nda comprare")
+
+    async def test_platforms_and_several_links_are_named(self):
+        replies = await self.answer(update(1, "https://youtu.be/abc?si=x"),
+                                    update(2, "https://example.com/a e https://example.com/b"))
+        self.assertEqual(replies, ["Ciao Ada, ho salvato il link di YouTube. Il contenuto lo leggerò più avanti.",
+                                   "Ciao Ada, ho salvato i 2 link. Il contenuto lo leggerò più avanti."])
+
+    async def test_a_link_sent_again_is_not_duplicated_and_says_since_when(self):
+        first = update(1, "https://www.youtube.com/watch?v=abc")
+        first["message"]["date"] = PI_DAY_2025
+        replies = await self.answer(first, update(2, "https://youtu.be/abc rifallo con meno sale"))
+        self.assertEqual(replies[1], "Ciao Ada, il link di YouTube era già tra ciò che custodisco, dal 14 marzo 2025.")
+        [item] = self.memory.search(limit=None).items
+        self.assertEqual((item.message_id, item.note), (10, "rifallo con meno sale"))
+
+    async def test_a_photo_with_a_link_in_the_caption(self):
+        caption = "tramonto https://example.com/scilla"
+        replies = await self.answer(update(1, photo=[{"file_id": "p", "file_unique_id": "P"}], caption=caption,
+                                           caption_entities=url_entities(caption)))
+        self.assertEqual(replies, ["Ciao Ada, ho salvato la foto e il link. Il contenuto lo leggerò più avanti."])
+        self.assertEqual([i.source for i in self.memory.of_message(42, 10)], ["photo", "link"])
+
+    async def test_an_edited_message_updates_its_item(self):
+        replies = await self.answer(update(1, "riso carnaroli"), update(2, "riso venere", edited=True, message_id=10))
+        self.assertEqual(replies, ["Ciao Ada, ho salvato la tua nota.", "Ciao Ada, ho aggiornato la tua nota."])
+        self.assertEqual([i.note for i in self.memory.search(limit=None).items], ["riso venere"])
+
+    async def test_unknown_commands_and_stickers_are_answered_but_not_saved(self):
+        replies = await self.answer(update(1, "/aiuto"), update(2, sticker={"file_id": "s", "file_unique_id": "S"}))
+        self.assertEqual(replies, ["Ciao Ada, non conosco il comando /aiuto.",
+                                   "Ciao Ada, questo tipo di messaggio non so ancora custodirlo."])
+        self.assertEqual(self.memory.count(), 0)
+
+    async def test_resume_after_saving_saves_nothing_twice_and_answers_the_same(self):
+        upd = update(1)
+        self.journal.record(1, upd, "acquisition")
+        self.journal.advance(1, "read")
+        with self.journal.transaction():  # arresto subito dopo il commit, prima della risposta
+            self.memory.save(42, 10, 1, intake.read(upd).drafts)
+            self.journal.advance(1, "saved")
+        await self.start()
         await self.until(lambda: self.state(1) == "done")
-        self.assertEqual(self.telegram.ok_calls("sendMessage")[0][1]["text"],
-                         "Hi Ada, I received your message: for now I'm keeping it safe, soon I'll be able to read it.")
+        self.assertEqual(self.replies(), [SAVED_LINK_IT])
+        self.assertEqual(self.memory.count(), 1)
 
     async def test_status_does_not_wait_behind_a_long_acquisition(self):
-        self.telegram.slow(text_has("custodisco"), 1.5)
+        self.telegram.slow(text_has("ho salvato"), 1.5)
         p = await self.start()
         self.record(p, update(1))
-        await self.until(lambda: self.state(1) == "read")
+        await self.until(lambda: self.state(1) == "saved")
         self.record(p, update(2, "/stato"))
         await self.until(lambda: self.state(2) == "done")
-        self.assertEqual(self.state(1), "read")  # l'acquisizione è ancora in corso
+        self.assertEqual(self.state(1), "saved")  # l'acquisizione è ancora in corso
         self.assertEqual(self.telegram.ok_calls("sendMessage")[0][1]["text"],
-                         "Ciao Ada, l'agente Custode è collegato. Messaggi da processare: 1, in errore: 0.")
+                         "Ciao Ada, l'agente Custode è collegato. Messaggi da processare: 1, in errore: 0. "
+                         "Elementi custoditi: 1.")
         await self.until(lambda: self.state(1) == "done")
 
     async def test_transient_error_is_retried(self):
@@ -108,7 +177,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.telegram.ok_calls("sendMessage")), 1)
 
     async def test_retries_exhausted_the_item_fails_is_reported_and_others_go_on(self):
-        self.telegram.rule(lambda m, prm: 500 if text_has("custodisco")(m, prm) and prm["reply_parameters"]["message_id"] == 10 else None)
+        self.telegram.rule(lambda m, prm: 500 if text_has("ho salvato")(m, prm) and prm["reply_parameters"]["message_id"] == 10 else None)
         p = await self.start()
         self.record(p, update(1))
         self.record(p, update(2))
@@ -122,7 +191,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reactions, ["👀", "😢"])
 
     async def test_permanent_error_fails_at_once(self):
-        self.telegram.rule(lambda m, prm: 400 if text_has("custodisco")(m, prm) else None)
+        self.telegram.rule(lambda m, prm: 400 if text_has("ho salvato")(m, prm) else None)
         p = await self.start()
         self.record(p, update(1))
         await self.until(lambda: self.state(1) == "failed")
@@ -164,7 +233,8 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.record(p, update(1))
         await self.until(lambda: self.journal.get(1).last_error is not None)
         entry = self.journal.get(1)
-        self.assertEqual((entry.state, entry.attempts), ("read", 0))
+        self.assertEqual((entry.state, entry.attempts), ("saved", 0))  # salvato: manca solo la risposta
+        self.assertEqual(self.memory.count(), 1)
         self.assertIn("token del bot rifiutato", entry.last_error)
         self.assertGreater(entry.next_attempt_at - time.time(), 25)
 
@@ -199,6 +269,40 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("errore finto 500", joined)  # gli errori ci sono, il token no
         self.assertNotIn(TOKEN, joined)
         self.assertNotIn("TEST-TOKEN", joined)
+
+
+def item(source, extraction="pending", platform=None, sent_at=PI_DAY_2025):
+    return Item(id=1, chat_id=42, message_id=10, source=source, url=None, platform=platform, site=None,
+                kind=None, title=None, topics=[], summary=None, note=None, content=None, extraction=extraction,
+                place=None, latitude=None, longitude=None, taken_at=None, media={}, sent_at=sent_at, saved_at=0)
+
+
+class AcquiredText(unittest.TestCase):
+    it, en = messages_for("it"), messages_for("en")
+
+    def text(self, t, *outcomes, edited=False, year=2026):
+        reading = intake.Reading((Draft("note"),), None, None, edited)
+        return acquired_text(t, reading, list(outcomes), year)
+
+    def test_saved_and_already_kept_in_one_answer(self):
+        self.assertEqual(self.text(self.it, Outcome(item("photo"), "saved"), Outcome(item("link", platform="tiktok"), "already")),
+                         "ho salvato la foto. Il contenuto lo leggerò più avanti. "
+                         "Il link di TikTok era già tra ciò che custodisco, dal 14 marzo 2025.")
+        self.assertEqual(self.text(self.en, Outcome(item("voice"), "saved"), Outcome(item("link"), "already")),
+                         "I saved the voice message. I'll read its content later. "
+                         "The link was already among the things I keep, since 14 March 2025.")
+
+    def test_this_year_needs_no_year(self):
+        self.assertEqual(self.text(self.it, Outcome(item("document"), "already"), year=2025),
+                         "il documento era già tra ciò che custodisco, dal 14 marzo.")
+
+    def test_several_already_kept(self):
+        self.assertEqual(self.text(self.it, Outcome(item("link"), "already"), Outcome(item("link"), "already")),
+                         "2 di questi erano già tra ciò che custodisco.")
+
+    def test_an_edited_note_needs_no_reading(self):
+        self.assertEqual(self.text(self.it, Outcome(item("note", "complete"), "saved"), edited=True),
+                         "ho aggiornato la tua nota.")
 
 
 class TelegramErrors(unittest.IsolatedAsyncioTestCase):

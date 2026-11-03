@@ -38,6 +38,7 @@ class Check(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Worker: w.example", out)
         self.assertIn("Registro: ricevuti 0, letti 0, salvati 0, risposti 0, completati 0, in errore 0.", out)
+        self.assertIn("coppermind: 0 elementi.", out)
         self.assertTrue((self.dir / "data" / "coppermind.db").exists())
         self.assertNotIn("SEGRETO", out)
 

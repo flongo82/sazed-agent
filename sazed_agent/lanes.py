@@ -4,8 +4,11 @@ Ogni corsia lavora un elemento alla volta, in ordine di arrivo, e non aspetta l'
 Ogni passo è scritto nel registro prima del successivo, così un arresto in qualunque punto
 riprende dallo stato registrato:
 
-- acquisizione: received → 👀 → read → risposta → answered → 👌 → done
-  (nel primo passo la "risposta" è provvisoria: nessun contenuto viene ancora letto);
+- acquisizione: received → 👀 → read → salvataggio in coppermind → saved → risposta →
+  answered → 👌 → done. Salvataggio e passaggio a saved stanno in una sola transazione, e la
+  risposta dice ciò che coppermind contiene dopo il commit: rifatta dopo un arresto, è la
+  stessa. Un messaggio senza nulla da custodire (un comando sconosciuto, uno sticker) passa
+  da read alla risposta senza salvare;
 - comandi: received → risposta → done.
 
 Una risposta già annotata nel registro non si rimanda. Se invece l'agente si ferma dopo
@@ -18,6 +21,8 @@ import contextlib
 import logging
 import time
 
+from . import intake
+from .coppermind import FILES, Coppermind, platform_label
 from .journal import LANES
 from .messages import STATUS_COMMANDS, messages_for
 from .telegram import TelegramError
@@ -42,8 +47,9 @@ def _message(update):
 
 class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
-                 typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time):
+                 typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None):
         self.journal, self.telegram = journal, telegram
+        self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
         self.retry_delays, self.typing_interval, self.idle_wait = retry_delays, typing_interval, idle_wait
         self.config_pause = config_pause  # attesa dopo un token rifiutato, senza contare tentativi
@@ -110,12 +116,22 @@ class Processor:
             await self._react(entry, self.reactions.received)
             self.journal.advance(entry.update_id, "read")
             state = "read"
+        reading = intake.read(entry.update)
+        if state == "read" and reading.drafts:
+            with self.journal.transaction():
+                sent_at = reading.sent_at if reading.sent_at is not None else int(entry.received_at)
+                saved = self.memory.save(entry.chat_id, entry.message_id, sent_at, reading.drafts)
+                self.journal.advance(entry.update_id, "saved")
+            log.info("elemento %s: %d in coppermind", entry.update_id, len(saved))
+            state = "saved"
         if state in ("read", "saved"):
             if entry.reply_message_id is None:
                 t, hello = self._voice(entry)
+                outcomes = self.memory.outcomes(entry.chat_id, entry.message_id, reading.drafts)
+                text = acquired_text(t, reading, outcomes, time.localtime(self.clock()).tm_year)
                 async with self._typing(entry.chat_id):
                     reply_id = await self.telegram.send_message(
-                        entry.chat_id, f"{hello}, {t['received']}", reply_to=entry.message_id)
+                        entry.chat_id, f"{hello}, {text}", reply_to=entry.message_id)
                 self.journal.set_reply(entry.update_id, reply_id)
             self.journal.advance(entry.update_id, "answered")
             state = "answered"
@@ -129,7 +145,7 @@ class Processor:
             t, hello = self._voice(entry)
             counts = self.journal.counts("acquisition")
             pending = sum(counts[state] for state in ACTIVE)
-            text = f"{hello}, {t['status'](self.bot_name, pending, counts['failed'])}"
+            text = f"{hello}, {t['status'](self.bot_name, pending, counts['failed'], self.memory.count())}"
             reply_id = await self.telegram.send_message(entry.chat_id, text, reply_to=entry.message_id)
             self.journal.set_reply(entry.update_id, reply_id)
         self.journal.advance(entry.update_id, "done")
@@ -179,3 +195,42 @@ class Processor:
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+def acquired_text(t, reading, outcomes, this_year):
+    """La risposta a un messaggio dell'acquisizione, da ciò che coppermind contiene davvero.
+
+    Una frase per ciò che è stato salvato (o aggiornato, se il messaggio è una modifica), una
+    se il contenuto resta da leggere, una per ciò che c'era già. La prima segue il saluto e
+    comincia in minuscolo, le altre in maiuscolo.
+    """
+    if reading.command:
+        return t["unknown_command"](reading.command)
+    if not outcomes:
+        return t["unsupported"]
+    saved = [o.item for o in outcomes if o.status == "saved"]
+    already = [o.item for o in outcomes if o.status == "already"]
+    sentences = []
+    if saved:
+        things = [_thing(t, i) for i in saved if i.source != "link"]
+        links = [i for i in saved if i.source == "link"]
+        if len(links) == 1:
+            things.append(_thing(t, links[0]))
+        elif links:
+            things.append(t["links"](len(links)))
+        sentences.append(t["updated" if reading.edited else "saved"](t["and"].join(things)))
+        if any(i.extraction == "pending" for i in saved):
+            sentences.append(t["later"])
+    if len(already) == 1:
+        when = time.localtime(already[0].sent_at)
+        year = None if when.tm_year == this_year else when.tm_year
+        sentences.append(t["already"](_thing(t, already[0]), t["date"](when.tm_mday, when.tm_mon, year)))
+    elif already:
+        sentences.append(t["already_many"](len(already)))
+    return " ".join([sentences[0]] + [s[:1].upper() + s[1:] for s in sentences[1:]])
+
+
+def _thing(t, item):
+    if item.source == "link":
+        return t["link"](platform_label(item.platform))
+    return t["file"](item.source) if item.source in FILES else t["note"]

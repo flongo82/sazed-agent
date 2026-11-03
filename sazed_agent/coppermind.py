@@ -1,0 +1,429 @@
+"""coppermind, la memoria di sazed: il catalogo di ciò che l'utente ha voluto custodire.
+
+Un unico file SQLite, lo stesso del registro degli ingressi, così che un salvataggio e il
+cambio di stato del messaggio da cui nasce stiano in una sola transazione (transaction()).
+Il modulo non dipende dal resto dell'agente: di Telegram conosce solo i riferimenti al
+messaggio d'origine (chat_id, message_id), con cui il bot può riproporlo.
+
+Ogni elemento nasce da un messaggio: una nota, un link (uno per ogni link del messaggio) o un
+file (foto, video, vocale, audio, documento). Il salvataggio è idempotente: rifatto con gli
+stessi dati non crea doppioni, e rifatto dopo una modifica del messaggio lo aggiorna. Lo stesso
+link, o lo stesso file, mandato una seconda volta resta un elemento solo: le parole nuove che
+lo accompagnano si aggiungono alla sua nota.
+
+Ricerca: filtri esatti (tipo, piattaforma, sito, ingresso, date), che danno elenchi completi e
+il loro totale, più il testo con FTS5 (senza badare agli accenti, anche per inizio di parola).
+La ricerca per significato arriverà con gli embedding calcolati sulla GPU.
+"""
+
+import json
+import re
+import sqlite3
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+VERSION = 1
+SOURCES = ("note", "link", "photo", "video", "video_note", "voice", "audio", "document")
+FILES = SOURCES[2:]
+EXTRACTIONS = ("pending", "complete", "partial", "failed", "unavailable")
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS items (
+  id          INTEGER PRIMARY KEY,
+  chat_id     INTEGER NOT NULL,
+  message_id  INTEGER NOT NULL,
+  source      TEXT    NOT NULL CHECK (source IN {SOURCES}),
+  origin      TEXT    UNIQUE,     -- link normalizzato o file: lo stesso è un elemento solo
+  url         TEXT,
+  platform    TEXT,               -- youtube, instagram, ..., web
+  site        TEXT,               -- l'host senza www.
+  kind        TEXT,               -- ricetta, articolo, video, ...: lo assegna il modello
+  title       TEXT,
+  topics      TEXT,               -- lista JSON
+  summary     TEXT,
+  note        TEXT,               -- le parole dell'utente
+  content     TEXT,               -- il testo estratto dalla fonte
+  extraction  TEXT    NOT NULL CHECK (extraction IN {EXTRACTIONS}),
+  place       TEXT,
+  latitude    REAL,
+  longitude   REAL,
+  taken_at    INTEGER,
+  media       TEXT,               -- JSON: file_id, nome, tipo, dimensione, durata
+  sent_at     INTEGER NOT NULL,   -- quando l'utente l'ha mandato
+  saved_at    REAL    NOT NULL,
+  updated_at  REAL    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS items_note ON items (chat_id, message_id) WHERE origin IS NULL;
+CREATE INDEX IF NOT EXISTS items_message ON items (chat_id, message_id);
+CREATE INDEX IF NOT EXISTS items_sent ON items (sent_at);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
+  title, topics, summary, note, content, url,
+  content='items', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS items_fts_insert AFTER INSERT ON items BEGIN
+  INSERT INTO items_fts (rowid, title, topics, summary, note, content, url)
+  VALUES (new.id, new.title, new.topics, new.summary, new.note, new.content, new.url);
+END;
+CREATE TRIGGER IF NOT EXISTS items_fts_delete AFTER DELETE ON items BEGIN
+  INSERT INTO items_fts (items_fts, rowid, title, topics, summary, note, content, url)
+  VALUES ('delete', old.id, old.title, old.topics, old.summary, old.note, old.content, old.url);
+END;
+CREATE TRIGGER IF NOT EXISTS items_fts_update AFTER UPDATE OF title, topics, summary, note, content, url
+ON items BEGIN
+  INSERT INTO items_fts (items_fts, rowid, title, topics, summary, note, content, url)
+  VALUES ('delete', old.id, old.title, old.topics, old.summary, old.note, old.content, old.url);
+  INSERT INTO items_fts (rowid, title, topics, summary, note, content, url)
+  VALUES (new.id, new.title, new.topics, new.summary, new.note, new.content, new.url);
+END;
+"""
+
+# Peso di ogni colonna di items_fts nell'ordinamento per pertinenza (bm25).
+WEIGHTS = (4.0, 3.0, 2.0, 2.0, 1.0, 1.0)
+
+# Le piattaforme che si riconoscono dall'indirizzo: nome, come si scrive, domini.
+PLATFORMS = {
+    "youtube": ("YouTube", ("youtube.com", "youtu.be", "youtube-nocookie.com")),
+    "instagram": ("Instagram", ("instagram.com", "instagr.am")),
+    "tiktok": ("TikTok", ("tiktok.com",)),
+    "facebook": ("Facebook", ("facebook.com", "fb.com", "fb.watch")),
+    "x": ("X", ("x.com", "twitter.com")),
+    "reddit": ("Reddit", ("reddit.com", "redd.it")),
+    "vimeo": ("Vimeo", ("vimeo.com",)),
+    "spotify": ("Spotify", ("spotify.com",)),
+    "github": ("GitHub", ("github.com",)),
+    "linkedin": ("LinkedIn", ("linkedin.com",)),
+}
+
+# Parametri che servono solo a tracciare chi condivide: via dagli indirizzi salvati.
+TRACKING = {"fbclid", "gclid", "dclid", "msclkid", "yclid", "mc_cid", "mc_eid", "igsh", "igshid",
+            "_hsenc", "_hsmi", "mkt_tok"}
+PLATFORM_TRACKING = {"youtube": {"si", "feature", "pp"}, "spotify": {"si"}, "x": {"s", "t"},
+                     "instagram": None, "tiktok": None}  # None: nessun parametro serve
+
+
+class CoppermindError(Exception):
+    """Database non utilizzabile da questa versione del modulo."""
+
+
+@dataclass(frozen=True)
+class Draft:
+    """Un elemento da salvare, come lo ricava chi legge il messaggio."""
+    source: str
+    url: str | None = None
+    note: str | None = None
+    title: str | None = None
+    media: dict | None = None
+
+
+@dataclass(frozen=True)
+class Item:
+    id: int
+    chat_id: int
+    message_id: int
+    source: str
+    url: str
+    platform: str
+    site: str
+    kind: str
+    title: str
+    topics: list
+    summary: str
+    note: str
+    content: str
+    extraction: str
+    place: str
+    latitude: float
+    longitude: float
+    taken_at: int
+    media: dict
+    sent_at: int
+    saved_at: float
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """Che ne è stato di un elemento: "saved" se è di questo messaggio, "already" se c'era già."""
+    item: Item
+    status: str
+
+
+@dataclass(frozen=True)
+class Results:
+    items: list
+    total: int   # quanti elementi rispondono ai criteri, anche oltre il limite
+
+
+@dataclass(frozen=True)
+class Link:
+    url: str        # l'indirizzo senza i parametri di tracciamento
+    key: str        # la forma con cui si riconosce lo stesso link
+    platform: str
+    site: str
+
+
+def connect(path):
+    """Il database, pronto per un arresto improvviso: WAL e synchronous=FULL."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path, isolation_level=None)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=FULL")
+    db.execute("PRAGMA busy_timeout=5000")
+    return db
+
+
+class transaction:
+    """BEGIN IMMEDIATE ... COMMIT, con ROLLBACK in caso di errore.
+
+    Dentro una transazione già aperta non apre nulla: le operazioni annidate diventano parte
+    di quella esterna, che decide per tutte.
+    """
+
+    def __init__(self, db):
+        self.db = db
+
+    def __enter__(self):
+        self.outer = self.db.in_transaction
+        if not self.outer:
+            self.db.execute("BEGIN IMMEDIATE")
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.outer:
+            self.db.execute("ROLLBACK" if exc_type else "COMMIT")
+        return False
+
+
+class Coppermind:
+    def __init__(self, db, clock=time.time):
+        self.db, self.clock = db, clock
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version > VERSION:
+            raise CoppermindError(f"database alla versione {version}, questo modulo arriva alla {VERSION}")
+        db.executescript(SCHEMA)
+        if version < VERSION:
+            db.execute(f"PRAGMA user_version = {VERSION}")
+
+    def save(self, chat_id, message_id, sent_at, drafts):
+        """Salva gli elementi di un messaggio e ne restituisce l'esito, nello stesso ordine.
+
+        Rifatto con gli stessi dati non cambia nulla; dopo una modifica del messaggio aggiorna
+        i suoi elementi e toglie quelli spariti. Se il messaggio cambia le parole, la
+        classificazione del modello decade; il testo estratto resta finché resta la fonte.
+        """
+        now = self.clock()
+        drafts = _unique(drafts)
+        with transaction(self.db):
+            kept = []
+            for draft in drafts:
+                origin = _origin(draft)
+                row = self._holder(chat_id, message_id, origin)
+                if row is not None and (row["chat_id"], row["message_id"]) != (chat_id, message_id):
+                    self._add_note(row, draft.note, now)
+                    continue
+                values = _values(draft)
+                if row is None:
+                    kept.append(self.db.execute(
+                        "INSERT INTO items (chat_id, message_id, source, origin, url, platform, site,"
+                        " title, note, media, extraction, sent_at, saved_at, updated_at)"
+                        " VALUES (:chat_id, :message_id, :source, :origin, :url, :platform, :site,"
+                        " :title, :note, :media, :extraction, :sent_at, :now, :now)",
+                        dict(values, chat_id=chat_id, message_id=message_id, origin=origin,
+                             sent_at=sent_at, now=now)).lastrowid)
+                    continue
+                self.db.execute(
+                    "UPDATE items SET source = :source, url = :url, platform = :platform, site = :site,"
+                    " media = :media, sent_at = :sent_at, updated_at = :now,"
+                    " kind = CASE WHEN note IS :note THEN kind END,"
+                    " title = CASE WHEN note IS :note THEN title ELSE :title END,"
+                    " topics = CASE WHEN note IS :note THEN topics END,"
+                    " summary = CASE WHEN note IS :note THEN summary END,"
+                    " note = :note WHERE id = :id",
+                    dict(values, sent_at=sent_at, now=now, id=row["id"]))
+                kept.append(row["id"])
+            marks = ", ".join("?" * len(kept))
+            self.db.execute(f"DELETE FROM items WHERE chat_id = ? AND message_id = ? AND id NOT IN ({marks})",
+                            (chat_id, message_id, *kept))
+        return self.outcomes(chat_id, message_id, drafts)
+
+    def outcomes(self, chat_id, message_id, drafts):
+        """L'esito di un salvataggio già fatto, senza scrivere nulla: serve anche dopo un arresto."""
+        found = []
+        for draft in _unique(drafts):
+            row = self._holder(chat_id, message_id, _origin(draft))
+            if row is not None:
+                mine = (row["chat_id"], row["message_id"]) == (chat_id, message_id)
+                found.append(Outcome(_item(row), "saved" if mine else "already"))
+        return found
+
+    def get(self, item_id):
+        row = self.db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        return _item(row) if row else None
+
+    def of_message(self, chat_id, message_id):
+        rows = self.db.execute("SELECT * FROM items WHERE chat_id = ? AND message_id = ? ORDER BY id",
+                               (chat_id, message_id)).fetchall()
+        return [_item(r) for r in rows]
+
+    def count(self):
+        return self.db.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+
+    def search(self, text=None, *, kind=None, platform=None, site=None, source=None, extraction=None,
+               since=None, until=None, words="all", limit=20, offset=0):
+        """Gli elementi che rispondono a tutti i criteri dati, con il loro totale.
+
+        kind, platform, source ed extraction accettano un valore o una lista; site vale anche
+        per i sottodomini; since e until sono istanti Unix (since compreso, until escluso).
+        Con il testo, words="all" vuole tutte le parole e "any" almeno una; ogni parola di tre
+        lettere o più vale anche come inizio di parola, e l'ordine è per pertinenza. Senza
+        testo, dal più recente. limit=None li restituisce tutti.
+        """
+        if words not in ("all", "any"):
+            raise ValueError(f"words deve essere \"all\" o \"any\", non {words!r}")
+        where, params = [], []
+        for column, value in (("kind", kind), ("platform", platform), ("source", source),
+                              ("extraction", extraction)):
+            if value is not None:
+                values = (value,) if isinstance(value, str) else tuple(value)
+                where.append(f"items.{column} IN ({', '.join('?' * len(values))})")
+                params += values
+        if site:
+            site = _bare_host(site.strip().lower())
+            where.append("(items.site = ? OR substr(items.site, -?) = ?)")
+            params += [site, len(site) + 1, "." + site]
+        if since is not None:
+            where.append("items.sent_at >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("items.sent_at < ?")
+            params.append(until)
+        tables, order = "items", "items.sent_at DESC, items.id DESC"
+        if text is not None and text.strip():
+            match = _match(text, words)
+            if match is None:  # niente parole da cercare, solo segni
+                return Results([], 0)
+            tables = "items JOIN items_fts ON items_fts.rowid = items.id"
+            where.append("items_fts MATCH ?")
+            params.append(match)
+            order = f"bm25(items_fts, {', '.join(map(str, WEIGHTS))}), " + order
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        total = self.db.execute(f"SELECT COUNT(*) FROM {tables}{clause}", params).fetchone()[0]
+        rows = self.db.execute(f"SELECT items.* FROM {tables}{clause} ORDER BY {order} LIMIT ? OFFSET ?",
+                               (*params, -1 if limit is None else limit, offset)).fetchall()
+        return Results([_item(r) for r in rows], total)
+
+    def _holder(self, chat_id, message_id, origin):
+        """L'elemento che ha già questa origine, o la nota di questo messaggio."""
+        if origin is None:
+            return self.db.execute("SELECT * FROM items WHERE chat_id = ? AND message_id = ? AND origin IS NULL",
+                                   (chat_id, message_id)).fetchone()
+        return self.db.execute("SELECT * FROM items WHERE origin = ?", (origin,)).fetchone()
+
+    def _add_note(self, row, note, now):
+        if note and note not in (row["note"] or ""):
+            self.db.execute("UPDATE items SET note = ?, updated_at = ? WHERE id = ?",
+                            (f"{row['note']}\n{note}" if row["note"] else note, now, row["id"]))
+
+
+def parse_link(url):
+    """Indirizzo pulito, chiave di riconoscimento, piattaforma e sito di un link.
+
+    La chiave ignora protocollo, www., barra finale, frammento e ordine dei parametri, e
+    riconduce le forme brevi (youtu.be) a quella completa: lo stesso video è lo stesso link.
+    """
+    url = url.strip()
+    if "://" not in url:
+        url = "https://" + url
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:  # indirizzo malformato (porta non valida, IPv6 rotto): si tiene com'è
+        return Link(url, url, "web", None)
+    site = _bare_host(host)
+    platform = next((name for name, (_, domains) in PLATFORMS.items()
+                     if any(site == d or site.endswith("." + d) for d in domains)), "web")
+    dropped = PLATFORM_TRACKING.get(platform, set())
+    params = [] if dropped is None else [
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if not k.startswith("utm_") and k not in TRACKING and k not in dropped]
+    clean = urlunsplit((parts.scheme.lower(), host + port, parts.path, urlencode(params), parts.fragment))
+    path = parts.path.rstrip("/")
+    key_site, key_params = site, sorted(params)
+    if platform == "youtube":
+        video = dict(params).get("v")
+        if site == "youtu.be" and path:
+            path, video = "/watch", path.lstrip("/")
+        key_site = "youtube.com"
+        if path == "/watch" and video:
+            key_params = [("v", video)]
+    elif platform == "x":
+        key_site = "x.com"
+    key = key_site + port + path
+    if key_params:
+        key += "?" + urlencode(key_params)
+    return Link(clean, key, platform, site)
+
+
+def platform_label(platform):
+    """Il nome della piattaforma come si scrive, o None per un sito qualunque."""
+    return PLATFORMS.get(platform, (None,))[0]
+
+
+def _bare_host(host):
+    for prefix in ("www.", "m.", "mobile."):
+        if host.startswith(prefix):
+            return host[len(prefix):]
+    return host
+
+
+def _origin(draft):
+    if draft.source == "link":
+        return "link:" + parse_link(draft.url).key
+    file_id = (draft.media or {}).get("file_unique_id")
+    return f"file:{file_id}" if draft.source in FILES and file_id else None
+
+
+def _unique(drafts):
+    """Una volta sola ciascuno, nell'ordine dato: un link ripetuto nel messaggio conta una volta."""
+    seen, out = set(), []
+    for draft in drafts:
+        origin = _origin(draft) or ("note", draft.source)
+        if origin not in seen:
+            seen.add(origin)
+            out.append(draft)
+    return out
+
+
+def _values(draft):
+    if draft.source not in SOURCES:
+        raise ValueError(f"ingresso sconosciuto: {draft.source}")
+    link = parse_link(draft.url) if draft.source == "link" else None
+    return {"source": draft.source, "url": link and link.url, "platform": link and link.platform,
+            "site": link and link.site, "title": draft.title, "note": draft.note or None,
+            "media": json.dumps(draft.media, ensure_ascii=False) if draft.media else None,
+            "extraction": "complete" if draft.source == "note" else "pending"}
+
+
+def _match(text, words):
+    """La query FTS5 per le parole di un testo: ogni parola tra virgolette, così nessun
+    carattere diventa sintassi; da tre lettere in su vale anche come inizio di parola."""
+    terms = re.findall(r"\w+", text)
+    if not terms:
+        return None
+    return (" AND " if words == "all" else " OR ").join(
+        f'"{t}"*' if len(t) >= 3 else f'"{t}"' for t in terms)
+
+
+def _item(row):
+    return Item(
+        id=row["id"], chat_id=row["chat_id"], message_id=row["message_id"], source=row["source"],
+        url=row["url"], platform=row["platform"], site=row["site"], kind=row["kind"], title=row["title"],
+        topics=json.loads(row["topics"]) if row["topics"] else [], summary=row["summary"],
+        note=row["note"], content=row["content"], extraction=row["extraction"], place=row["place"],
+        latitude=row["latitude"], longitude=row["longitude"], taken_at=row["taken_at"],
+        media=json.loads(row["media"]) if row["media"] else {}, sent_at=row["sent_at"],
+        saved_at=row["saved_at"],
+    )

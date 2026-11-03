@@ -18,7 +18,8 @@ from tests import fake_telegram, fake_worker
 def update(update_id, text):
     return {"update_id": update_id,
             "message": {"message_id": update_id * 10, "chat": {"id": 42, "type": "private"},
-                        "from": {"id": 42, "first_name": "Ada", "language_code": "it"}, "text": text}}
+                        "from": {"id": 42, "first_name": "Ada", "language_code": "it"}, "text": text,
+                        "entities": fake_telegram.url_entities(text)}}
 
 
 class Flow(unittest.IsolatedAsyncioTestCase):
@@ -59,11 +60,11 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: all(journal.get(i) and journal.get(i).state == "done" for i in (1, 2, 3)))
         self.assertEqual(self.worker.acks, [1, 2, 3])
         self.assertEqual(self.worker.queue, [])
-        texts = [p["text"] for _, p in self.telegram.ok_calls("sendMessage")]
+        texts = {p["reply_parameters"]["message_id"]: p["text"] for _, p in self.telegram.ok_calls("sendMessage")}
         self.assertEqual(len(texts), 3)
-        self.assertEqual(texts.count("Ciao Ada, ho ricevuto il tuo messaggio: per ora lo custodisco, "
-                                     "presto saprò leggerlo."), 2)
-        self.assertTrue(any(t.startswith("Ciao Ada, l'agente Custode è collegato.") for t in texts))
+        self.assertEqual(texts[10], "Ciao Ada, ho salvato il link. Il contenuto lo leggerò più avanti.")
+        self.assertTrue(texts[20].startswith("Ciao Ada, l'agente Custode è collegato."))
+        self.assertEqual(texts[30], "Ciao Ada, ho salvato la tua nota.")
         stop.set()
         await asyncio.wait_for(task, 5)
         journal.close()
