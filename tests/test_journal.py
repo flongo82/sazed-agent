@@ -1,6 +1,7 @@
 """Registro locale: idempotenza, durabilità, stati che solo avanzano, tentativi."""
 
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,22 @@ class JournalTest(unittest.TestCase):
             self.journal.advance(1, "read")
         self.assertEqual(self.journal.get(1).state, "read")
         self.assertFalse(self.journal.db.in_transaction)
+
+    def test_a_journal_from_before_the_interpretation_gets_its_column(self):
+        old = self.dir / "vecchio.db"
+        db = sqlite3.connect(old)
+        db.execute("CREATE TABLE inbox (update_id INTEGER PRIMARY KEY, queue_id INTEGER NOT NULL,"
+                   " received_at REAL NOT NULL, chat_id INTEGER, message_id INTEGER, lane TEXT NOT NULL,"
+                   " state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL NOT NULL,"
+                   " last_error TEXT, reply_message_id INTEGER, updated_at REAL NOT NULL, payload TEXT NOT NULL)")
+        db.execute("INSERT INTO inbox VALUES (1, 1, 0, 42, 2, 'acquisition', 'done', 0, 0, NULL, NULL, 0, '{}')")
+        db.commit()
+        db.close()
+        journal = Journal(old)
+        self.addCleanup(journal.close)
+        self.assertIsNone(journal.get(1).interpretation)
+        journal.set_interpretation(1, {"intent": "question", "question": "dove?", "items": []})
+        self.assertEqual(journal.get(1).interpretation["question"], "dove?")
 
     def test_unknown_item(self):
         with self.assertRaisesRegex(JournalError, "non è nel registro"):

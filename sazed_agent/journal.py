@@ -8,6 +8,8 @@ sull'update_id di Telegram.
 
 Stati, nell'ordine: received → read → saved → answered → done; failed da qualunque stato non
 finale. Uno stato può solo avanzare: dopo un arresto si riprende da quello registrato.
+L'interpretazione del modello si annota appena arriva (set_interpretation): dopo un arresto si
+riusa quella, senza chiederla una seconda volta.
 """
 
 import json
@@ -34,7 +36,8 @@ CREATE TABLE IF NOT EXISTS inbox (
   last_error       TEXT,
   reply_message_id INTEGER,
   updated_at       REAL    NOT NULL,
-  payload          TEXT    NOT NULL
+  payload          TEXT    NOT NULL,
+  interpretation   TEXT
 );
 CREATE INDEX IF NOT EXISTS inbox_due ON inbox (lane, state, next_attempt_at);
 """
@@ -58,6 +61,7 @@ class Entry:
     last_error: str
     reply_message_id: int
     update: dict
+    interpretation: dict | None
 
 
 class Journal:
@@ -65,6 +69,8 @@ class Journal:
         self.clock = clock
         self.db = connect(path)
         self.db.executescript(SCHEMA)
+        if "interpretation" not in {r["name"] for r in self.db.execute("PRAGMA table_info(inbox)")}:
+            self.db.execute("ALTER TABLE inbox ADD COLUMN interpretation TEXT")  # registri di prima
 
     def close(self):
         self.db.close()
@@ -122,6 +128,14 @@ class Journal:
             self.db.execute(
                 "UPDATE inbox SET reply_message_id = ?, updated_at = ? WHERE update_id = ?",
                 (reply_message_id, self.clock(), update_id),
+            )
+
+    def set_interpretation(self, update_id, interpretation):
+        """Annota ciò che il modello ha capito del messaggio, come dizionario JSON."""
+        with self.transaction():
+            self.db.execute(
+                "UPDATE inbox SET interpretation = ?, updated_at = ? WHERE update_id = ?",
+                (json.dumps(interpretation, ensure_ascii=False), self.clock(), update_id),
             )
 
     def next_attempt(self, lane):
@@ -205,4 +219,5 @@ def _entry(row):
         attempts=row["attempts"], next_attempt_at=row["next_attempt_at"],
         last_error=row["last_error"], reply_message_id=row["reply_message_id"],
         update=json.loads(row["payload"]),
+        interpretation=json.loads(row["interpretation"]) if row["interpretation"] else None,
     )

@@ -9,12 +9,14 @@ import unittest
 from pathlib import Path
 
 from sazed_agent import intake
+from sazed_agent.claude import Claude
 from sazed_agent.config import Reactions
 from sazed_agent.coppermind import Coppermind, Draft, Item, Outcome
 from sazed_agent.journal import Journal
 from sazed_agent.lanes import Processor, acquired_text, lane_for
 from sazed_agent.messages import messages_for
 from sazed_agent.telegram import Telegram, TelegramError
+from tests import fake_claude
 from tests.fake_telegram import TOKEN, FakeTelegram, url_entities
 
 SAVED_LINK_IT = "Ciao Ada, ho salvato il link. Il contenuto lo leggerò più avanti."
@@ -47,10 +49,16 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.memory = Coppermind(self.journal.db)
         self.stop = asyncio.Event()
 
-    def processor(self, token=TOKEN, delays=(0.05, 0.1)):
+    def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None):
         return Processor(self.journal, Telegram(self.telegram.api_base, token, timeout=5), "Custode", "auto",
                          Reactions("👀", "👌", "😢"), delays, typing_interval=0.05, idle_wait=5.0,
-                         config_pause=30.0, memory=self.memory)
+                         config_pause=30.0, memory=self.memory, claude=claude)
+
+    def with_claude(self, key=fake_claude.KEY):
+        """Un finto Claude, e il processore che lo usa."""
+        self.claude = fake_claude.FakeClaude().start()
+        self.addCleanup(self.claude.stop)
+        return self.processor(claude=Claude(key, self.claude.api_base, "claude-haiku-5-5", timeout=5, max_retries=0))
 
     async def start(self, processor=None):
         processor = processor or self.processor()
@@ -80,9 +88,9 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
     def replies(self):
         return [prm["text"] for _, prm in self.telegram.ok_calls("sendMessage")]
 
-    async def answer(self, *updates):
+    async def answer(self, *updates, processor=None):
         """Elabora i messaggi uno dopo l'altro e restituisce le risposte, nello stesso ordine."""
-        p = await self.start()
+        p = await self.start(processor)
         for upd in updates:
             self.record(p, upd)
             await self.until(lambda: self.state(upd["update_id"]) == "done")
@@ -154,6 +162,81 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.state(1) == "done")
         self.assertEqual(self.replies(), [SAVED_LINK_IT])
         self.assertEqual(self.memory.count(), 1)
+
+    async def test_claude_describes_a_note_and_the_reply_names_it(self):
+        p = self.with_claude()
+        self.claude.answer(lambda m: {"intent": "save", "question": None, "items": [
+            {"index": 0, "kind": "note", "title": "Spesa di sabato", "topics": ["Spesa", "riso"],
+             "summary": "Cose da comprare."}]})
+        replies = await self.answer(update(1, "riso carnaroli\nparmigiano"), processor=p)
+        self.assertEqual(replies, ["Ciao Ada, ho salvato la tua nota «Spesa di sabato»."])
+        self.assertEqual(self.claude.messages(), [{"language": "it", "words": "riso carnaroli\nparmigiano",
+                                                   "items": [{"index": 0, "source": "note"}]}])
+        [item] = self.memory.of_message(42, 10)
+        self.assertEqual((item.kind, item.title, item.topics, item.summary),
+                         ("note", "Spesa di sabato", ["spesa", "riso"], "Cose da comprare."))
+        self.assertEqual(self.memory.search("sabato").total, 1)  # titolo e argomenti si cercano
+
+    async def test_a_question_waits_for_its_answer_and_nothing_is_saved(self):
+        p = self.with_claude()
+        self.claude.answer(lambda m: {"intent": "question", "question": "Dove ho messo la carbonara?", "items": []})
+        replies = await self.answer(update(1, "dove ho messo la carbonara?"), update(2, "where?", lang="en"),
+                                    processor=p)
+        self.assertEqual(replies, ["Ciao Ada, alle domande saprò rispondere presto: per ora non ho salvato nulla.",
+                                   "Hi Ada, I'll be able to answer questions soon: for now I haven't saved anything."])
+        self.assertEqual(self.memory.count(), 0)
+        self.assertEqual(self.journal.get(1).interpretation["question"], "Dove ho messo la carbonara?")
+        self.assertEqual([m["language"] for m in self.claude.messages()], ["it", "en"])
+
+    async def test_a_link_with_a_question_is_saved_and_the_question_waits(self):
+        p = self.with_claude()
+        self.claude.answer(lambda m: {"intent": "question", "question": "La faccio stasera?", "items": [
+            {"index": 0, "kind": "recipe", "title": "Carbonara", "topics": ["uova"], "summary": None}]})
+        replies = await self.answer(update(1, "https://example.com/carbonara la faccio stasera?"), processor=p)
+        self.assertEqual(replies, ["Ciao Ada, ho salvato il link «Carbonara». Il contenuto lo leggerò più avanti. "
+                                   "Alla tua domanda saprò rispondere presto."])
+        self.assertEqual([i.kind for i in self.memory.search(kind="recipe").items], ["recipe"])
+
+    async def test_without_words_claude_is_not_asked(self):
+        p = self.with_claude()
+        await self.answer(update(1, photo=[{"file_id": "p", "file_unique_id": "P"}]), update(2, "/aiuto"),
+                          update(3, sticker={"file_id": "s", "file_unique_id": "S"}), processor=p)
+        self.assertEqual(self.claude.requests, [])
+        self.assertEqual(self.memory.count(), 1)
+
+    async def test_a_refusal_keeps_the_note_without_a_description(self):
+        p = self.with_claude()
+        self.claude.stop_with("refusal")
+        self.assertEqual(await self.answer(update(1, "una nota qualunque"), processor=p),
+                         ["Ciao Ada, ho salvato la tua nota."])
+        self.assertIsNone(self.memory.of_message(42, 10)[0].kind)
+
+    async def test_claude_down_is_retried(self):
+        p = self.with_claude()
+        self.claude.fail(500)
+        self.assertEqual(await self.answer(update(1, "riso"), processor=p), ["Ciao Ada, ho salvato la tua nota."])
+        self.assertEqual((self.journal.get(1).attempts, len(self.claude.requests)), (1, 2))
+
+    async def test_a_rejected_claude_key_waits_without_using_attempts(self):
+        p = await self.start(self.with_claude(key="sk-ant-api03-SBAGLIATA"))
+        self.record(p, update(1, "riso"))
+        await self.until(lambda: self.journal.get(1).last_error is not None)
+        entry = self.journal.get(1)
+        self.assertEqual((entry.state, entry.attempts, self.memory.count()), ("read", 0, 0))
+        self.assertIn("chiave dell'API di Claude rifiutata", entry.last_error)
+        self.assertNotIn("SBAGLIATA", entry.last_error)
+
+    async def test_the_interpretation_is_asked_once_even_after_a_crash(self):
+        upd = update(1, "https://example.com/zucca")
+        self.journal.record(1, upd, "acquisition")
+        self.journal.advance(1, "read")
+        self.journal.set_interpretation(1, {"intent": "save", "question": None, "items": [
+            {"index": 0, "kind": "recipe", "title": "Vellutata", "topics": ["zucca"], "summary": None}]})
+        await self.start(self.with_claude())  # arresto dopo l'interpretazione, prima del salvataggio
+        await self.until(lambda: self.state(1) == "done")
+        self.assertEqual(self.claude.requests, [])
+        self.assertEqual(self.replies(), ["Ciao Ada, ho salvato il link «Vellutata». Il contenuto lo leggerò più avanti."])
+        self.assertEqual(self.memory.of_message(42, 10)[0].topics, ["zucca"])
 
     async def test_status_does_not_wait_behind_a_long_acquisition(self):
         self.telegram.slow(text_has("ho salvato"), 1.5)

@@ -30,6 +30,9 @@ MESSAGES = {
         "date": lambda day, month, year=None: f"{day} {MONTHS_IT[month - 1]}" + (f" {year}" if year else ""),
         "unknown_command": lambda command: f"non conosco il comando {command}.",
         "unsupported": "questo tipo di messaggio non so ancora custodirlo.",
+        "titled": lambda thing, title: f"{thing} «{title}»",
+        "question_later": "alle domande saprò rispondere presto: per ora non ho salvato nulla.",
+        "question_later_too": "alla tua domanda saprò rispondere presto.",
         "status": lambda name, pending, failed, kept: (
             f"l'agente {name} è collegato. Messaggi da processare: {pending}, in errore: {failed}. "
             f"Elementi custoditi: {kept}."
@@ -55,6 +58,9 @@ MESSAGES = {
         "date": lambda day, month, year=None: f"{day} {MONTHS_EN[month - 1]}" + (f" {year}" if year else ""),
         "unknown_command": lambda command: f"I don't know the command {command}.",
         "unsupported": "I can't keep this kind of message yet.",
+        "titled": lambda thing, title: f"{thing} “{title}”",
+        "question_later": "I'll be able to answer questions soon: for now I haven't saved anything.",
+        "question_later_too": "I'll be able to answer your question soon.",
         "status": lambda name, pending, failed, kept: (
             f"the {name} agent is connected. Messages to process: {pending}, failed: {failed}. "
             f"Items kept: {kept}."
@@ -71,11 +77,16 @@ MESSAGES = {
 STATUS_COMMANDS = frozenset(f"/{t['status_command']}" for t in MESSAGES.values())
 
 
-def messages_for(setting, language_code=None):
-    """I testi nella lingua giusta: quella fissata, o con "auto" quella dell'app Telegram.
+def language_for(setting, language_code=None):
+    """La lingua giusta: quella fissata, o con "auto" quella dell'app Telegram.
 
     Una lingua senza testi ricade sull'inglese, come in sazed-bot.
     """
     setting = (setting or "auto").strip().lower()
     lang = (language_code or "")[:2].lower() if setting == "auto" else setting
-    return MESSAGES.get(lang, MESSAGES["en"])
+    return lang if lang in MESSAGES else "en"
+
+
+def messages_for(setting, language_code=None):
+    """I testi nella lingua giusta (language_for)."""
+    return MESSAGES[language_for(setting, language_code)]

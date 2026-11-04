@@ -126,6 +126,17 @@ class Saving(Base):
                          ("buonissima", None, None, [], None))
         self.assertEqual((item.content, item.extraction, item.saved_at), ("testo della pagina", "complete", 5000.0))
 
+    def test_a_new_description_replaces_the_old_one_and_no_description_keeps_it(self):
+        draft = Draft("link", url="https://example.com/r", note="buona", kind="recipe", title="Risotto",
+                      topics=("riso",), summary="Un risotto.")
+        [out] = self.save(10, draft)
+        self.assertEqual((out.item.kind, out.item.title, out.item.topics), ("recipe", "Risotto", ["riso"]))
+        self.save(10, Draft("link", url="https://example.com/r", note="buona"))  # senza descrizione
+        self.assertEqual(self.memory.get(out.item.id).title, "Risotto")
+        self.save(10, Draft("link", url="https://example.com/r", note="buona", kind="article", title="Altro"))
+        item = self.memory.get(out.item.id)
+        self.assertEqual((item.kind, item.title, item.topics, item.summary), ("article", "Altro", [], None))
+
     def test_an_edit_that_changes_the_link_replaces_the_item(self):
         [old] = self.save(10, Draft("link", url="https://example.com/vecchio"))
         [new] = self.save(10, Draft("link", url="https://example.com/nuovo"))

@@ -14,6 +14,7 @@ import signal
 import sys
 from urllib.parse import urlsplit
 
+from .claude import Claude
 from .config import ConfigError, load
 from .coppermind import Coppermind, CoppermindError
 from .journal import Journal
@@ -74,12 +75,21 @@ def run(config_path):
         try:
             processor = Processor(journal, Telegram(config.telegram_api_base, bot_token), config.bot_name,
                                   config.language, config.reactions, config.retry_delays,
-                                  memory=Coppermind(journal.db))
+                                  memory=Coppermind(journal.db), claude=claude_for(config))
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
                               config.pong_timeout, on_recorded=processor.notify)
             asyncio.run(serve(link, processor))
         finally:
             journal.close()
+
+
+def claude_for(config):
+    """Claude, se configurato; senza, l'agente lavora lo stesso e ogni testo diventa una nota."""
+    try:
+        return Claude(config.anthropic_api_key, config.claude.api_base, config.claude.model)
+    except ConfigError as err:
+        log.warning("Claude non configurato, ogni testo diventa una nota: %s", err)
+        return None
 
 
 async def serve(link, processor, stop=None):

@@ -4,11 +4,12 @@ Ogni corsia lavora un elemento alla volta, in ordine di arrivo, e non aspetta l'
 Ogni passo è scritto nel registro prima del successivo, così un arresto in qualunque punto
 riprende dallo stato registrato:
 
-- acquisizione: received → 👀 → read → salvataggio in coppermind → saved → risposta →
-  answered → 👌 → done. Salvataggio e passaggio a saved stanno in una sola transazione, e la
-  risposta dice ciò che coppermind contiene dopo il commit: rifatta dopo un arresto, è la
-  stessa. Un messaggio senza nulla da custodire (un comando sconosciuto, uno sticker) passa
-  da read alla risposta senza salvare;
+- acquisizione: received → 👀 → read → Claude interpreta → salvataggio in coppermind → saved
+  → risposta → answered → 👌 → done. L'interpretazione si annota nel registro appena arriva;
+  salvataggio e passaggio a saved stanno in una sola transazione, e la risposta dice ciò che
+  coppermind contiene dopo il commit: rifatta dopo un arresto, è la stessa. Un messaggio senza
+  nulla da custodire (una domanda, un comando sconosciuto, uno sticker) passa da read alla
+  risposta senza salvare;
 - comandi: received → risposta → done.
 
 Una risposta già annotata nel registro non si rimanda. Se invece l'agente si ferma dopo
@@ -18,13 +19,15 @@ Le reazioni sono un segnale, non il contenuto: se Telegram ne rifiuta una, si va
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import time
 
 from . import intake
-from .coppermind import FILES, Coppermind, platform_label
+from .claude import ClaudeError, Interpretation
+from .coppermind import FILES, Coppermind, platform_label, unique
 from .journal import LANES
-from .messages import STATUS_COMMANDS, messages_for
+from .messages import STATUS_COMMANDS, language_for, messages_for
 from .telegram import TelegramError
 
 log = logging.getLogger("sazed_agent.lanes")
@@ -47,9 +50,11 @@ def _message(update):
 
 class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
-                 typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None):
+                 typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None,
+                 claude=None):
         self.journal, self.telegram = journal, telegram
         self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
+        self.claude = claude  # senza, ogni testo è una nota e nulla viene descritto
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
         self.retry_delays, self.typing_interval, self.idle_wait = retry_delays, typing_interval, idle_wait
         self.config_pause = config_pause  # attesa dopo un token rifiutato, senza contare tentativi
@@ -88,7 +93,7 @@ class Processor:
         try:
             await handle(entry)
             return
-        except TelegramError as err:
+        except (TelegramError, ClaudeError) as err:
             if err.config_error:
                 log.error("elemento %s rimandato di %g s: %s", entry.update_id, self.config_pause, err)
                 self.journal.postpone(entry.update_id, self.config_pause, err)
@@ -117,18 +122,25 @@ class Processor:
             self.journal.advance(entry.update_id, "read")
             state = "read"
         reading = intake.read(entry.update)
-        if state == "read" and reading.drafts:
-            with self.journal.transaction():
-                sent_at = reading.sent_at if reading.sent_at is not None else int(entry.received_at)
-                saved = self.memory.save(entry.chat_id, entry.message_id, sent_at, reading.drafts)
-                self.journal.advance(entry.update_id, "saved")
-            log.info("elemento %s: %d in coppermind", entry.update_id, len(saved))
-            state = "saved"
+        drafts = unique(reading.drafts)
+        meaning = Interpretation.from_dict(entry.interpretation) if entry.interpretation else None
+        if state == "read":
+            if meaning is None:
+                meaning = await self._interpret(entry, reading, drafts)
+                self.journal.set_interpretation(entry.update_id, meaning.to_dict())
+            if meaning.saves and drafts:
+                with self.journal.transaction():
+                    sent_at = reading.sent_at if reading.sent_at is not None else int(entry.received_at)
+                    saved = self.memory.save(entry.chat_id, entry.message_id, sent_at, described(drafts, meaning))
+                    self.journal.advance(entry.update_id, "saved")
+                log.info("elemento %s: %d in coppermind", entry.update_id, len(saved))
+                state = "saved"
         if state in ("read", "saved"):
             if entry.reply_message_id is None:
                 t, hello = self._voice(entry)
-                outcomes = self.memory.outcomes(entry.chat_id, entry.message_id, reading.drafts)
-                text = acquired_text(t, reading, outcomes, time.localtime(self.clock()).tm_year)
+                outcomes = self.memory.outcomes(entry.chat_id, entry.message_id, drafts)
+                text = acquired_text(t, reading, outcomes, time.localtime(self.clock()).tm_year,
+                                     meaning or Interpretation())
                 async with self._typing(entry.chat_id):
                     reply_id = await self.telegram.send_message(
                         entry.chat_id, f"{hello}, {text}", reply_to=entry.message_id)
@@ -139,6 +151,21 @@ class Processor:
             await self._react(entry, self.reactions.done)
             self.journal.advance(entry.update_id, "done")
             log.info("elemento %s completato: risposta inviata", entry.update_id)
+
+    async def _interpret(self, entry, reading, drafts):
+        """Che cosa vuole il messaggio, secondo Claude. Senza Claude, o senza nulla da leggere
+        (un file senza didascalia, un comando), il messaggio è da salvare così com'è."""
+        words = next((d.note for d in drafts if d.note), None)
+        if self.claude is None or reading.command or not drafts or (words is None and all(
+                d.source in FILES for d in drafts)):
+            return Interpretation()
+        sender = _message(entry.update).get("from") or {}
+        async with self._typing(entry.chat_id):
+            meaning = await self.claude.interpret(words, drafts, language_for(self.language,
+                                                                              sender.get("language_code")))
+        log.info("elemento %s: per Claude è %s, %d elementi descritti", entry.update_id, meaning.intent,
+                 len(meaning.items))
+        return meaning
 
     async def _command(self, entry):
         if entry.reply_message_id is None:
@@ -197,15 +224,27 @@ class Processor:
             await asyncio.gather(task, return_exceptions=True)
 
 
-def acquired_text(t, reading, outcomes, this_year):
+def described(drafts, meaning):
+    """Gli elementi con la descrizione di Claude; il titolo, se Claude non ne ha, resta quello
+    che il codice aveva (il nome di un documento)."""
+    by_index = {c.index: c for c in meaning.items}
+    return [d if (c := by_index.get(i)) is None else dataclasses.replace(
+        d, kind=c.kind, title=c.title or d.title, topics=c.topics, summary=c.summary)
+        for i, d in enumerate(drafts)]
+
+
+def acquired_text(t, reading, outcomes, this_year, meaning=Interpretation()):
     """La risposta a un messaggio dell'acquisizione, da ciò che coppermind contiene davvero.
 
-    Una frase per ciò che è stato salvato (o aggiornato, se il messaggio è una modifica), una
-    se il contenuto resta da leggere, una per ciò che c'era già. La prima segue il saluto e
-    comincia in minuscolo, le altre in maiuscolo.
+    Una frase per ciò che è stato salvato (o aggiornato, se il messaggio è una modifica), con il
+    titolo se è uno solo; una se il contenuto resta da leggere, una per ciò che c'era già, una
+    se c'era anche una domanda. La prima segue il saluto e comincia in minuscolo, le altre in
+    maiuscolo.
     """
     if reading.command:
         return t["unknown_command"](reading.command)
+    if not meaning.saves:
+        return t["question_later"]
     if not outcomes:
         return t["unsupported"]
     saved = [o.item for o in outcomes if o.status == "saved"]
@@ -218,6 +257,8 @@ def acquired_text(t, reading, outcomes, this_year):
             things.append(_thing(t, links[0]))
         elif links:
             things.append(t["links"](len(links)))
+        if len(saved) == 1 and saved[0].title:
+            things = [t["titled"](things[0], saved[0].title)]
         sentences.append(t["updated" if reading.edited else "saved"](t["and"].join(things)))
         if any(i.extraction == "pending" for i in saved):
             sentences.append(t["later"])
@@ -227,6 +268,8 @@ def acquired_text(t, reading, outcomes, this_year):
         sentences.append(t["already"](_thing(t, already[0]), t["date"](when.tm_mday, when.tm_mon, year)))
     elif already:
         sentences.append(t["already_many"](len(already)))
+    if meaning.asks:
+        sentences.append(t["question_later_too"])
     return " ".join([sentences[0]] + [s[:1].upper() + s[1:] for s in sentences[1:]])
 
 

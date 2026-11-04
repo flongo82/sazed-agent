@@ -36,8 +36,16 @@ link or file sent twice stays one item, and an edited message updates its items.
 work: complete lists with exact filters (type, platform, site, kind of input, dates) and
 full-text search that ignores accents and matches word beginnings.
 
-Next: Claude tells notes from questions, classifies what is saved and answers from coppermind;
-then the agent starts reading pages, videos and files. The architecture, the reasons behind it
+Claude now reads every message that has words or links in it (Claude Haiku, through the API):
+it tells what is to be kept from what is a question, and describes each item with a kind
+(recipe, article, video, note…), a title, topics and a short summary, which coppermind indexes.
+It sees only your words and what the code knows of each item, never the content behind a link,
+and it answers as structured data that the code checks before saving: a message with links or
+files is always kept, and if Claude refuses or its answer is unusable the item is saved without
+a description. Its interpretation is recorded in the journal, so a restart never asks twice.
+Without a key the agent works as before, and every text becomes a note.
+
+Next: questions answered from coppermind; then the agent starts reading pages, videos and files. The architecture, the reasons behind it
 and the protocol between the two parts are described in the README of `sazed-bot`.
 
 ## Getting started

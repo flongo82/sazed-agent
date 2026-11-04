@@ -110,12 +110,20 @@ class CoppermindError(Exception):
 
 @dataclass(frozen=True)
 class Draft:
-    """Un elemento da salvare, come lo ricava chi legge il messaggio."""
+    """Un elemento da salvare, come lo ricava chi legge il messaggio; tipo, argomenti e
+    riassunto (e il titolo, se c'è) li aggiunge il modello."""
     source: str
     url: str | None = None
     note: str | None = None
     title: str | None = None
     media: dict | None = None
+    kind: str | None = None
+    topics: tuple = ()
+    summary: str | None = None
+
+    @property
+    def described(self):
+        return self.kind is not None or self.summary is not None or bool(self.topics)
 
 
 @dataclass(frozen=True)
@@ -210,11 +218,12 @@ class Coppermind:
         """Salva gli elementi di un messaggio e ne restituisce l'esito, nello stesso ordine.
 
         Rifatto con gli stessi dati non cambia nulla; dopo una modifica del messaggio aggiorna
-        i suoi elementi e toglie quelli spariti. Se il messaggio cambia le parole, la
-        classificazione del modello decade; il testo estratto resta finché resta la fonte.
+        i suoi elementi e toglie quelli spariti. Una descrizione nuova del modello sostituisce
+        la vecchia; senza, se il messaggio cambia le parole, la vecchia decade. Il testo
+        estratto resta finché resta la fonte.
         """
         now = self.clock()
-        drafts = _unique(drafts)
+        drafts = unique(drafts)
         with transaction(self.db):
             kept = []
             for draft in drafts:
@@ -227,21 +236,21 @@ class Coppermind:
                 if row is None:
                     kept.append(self.db.execute(
                         "INSERT INTO items (chat_id, message_id, source, origin, url, platform, site,"
-                        " title, note, media, extraction, sent_at, saved_at, updated_at)"
+                        " kind, title, topics, summary, note, media, extraction, sent_at, saved_at, updated_at)"
                         " VALUES (:chat_id, :message_id, :source, :origin, :url, :platform, :site,"
-                        " :title, :note, :media, :extraction, :sent_at, :now, :now)",
+                        " :kind, :title, :topics, :summary, :note, :media, :extraction, :sent_at, :now, :now)",
                         dict(values, chat_id=chat_id, message_id=message_id, origin=origin,
                              sent_at=sent_at, now=now)).lastrowid)
                     continue
                 self.db.execute(
                     "UPDATE items SET source = :source, url = :url, platform = :platform, site = :site,"
                     " media = :media, sent_at = :sent_at, updated_at = :now,"
-                    " kind = CASE WHEN note IS :note THEN kind END,"
-                    " title = CASE WHEN note IS :note THEN title ELSE :title END,"
-                    " topics = CASE WHEN note IS :note THEN topics END,"
-                    " summary = CASE WHEN note IS :note THEN summary END,"
+                    " kind = CASE WHEN :described THEN :kind WHEN note IS :note THEN kind END,"
+                    " title = CASE WHEN :described OR note IS NOT :note THEN :title ELSE title END,"
+                    " topics = CASE WHEN :described THEN :topics WHEN note IS :note THEN topics END,"
+                    " summary = CASE WHEN :described THEN :summary WHEN note IS :note THEN summary END,"
                     " note = :note WHERE id = :id",
-                    dict(values, sent_at=sent_at, now=now, id=row["id"]))
+                    dict(values, sent_at=sent_at, now=now, id=row["id"], described=draft.described))
                 kept.append(row["id"])
             marks = ", ".join("?" * len(kept))
             self.db.execute(f"DELETE FROM items WHERE chat_id = ? AND message_id = ? AND id NOT IN ({marks})",
@@ -251,7 +260,7 @@ class Coppermind:
     def outcomes(self, chat_id, message_id, drafts):
         """L'esito di un salvataggio già fatto, senza scrivere nulla: serve anche dopo un arresto."""
         found = []
-        for draft in _unique(drafts):
+        for draft in unique(drafts):
             row = self._holder(chat_id, message_id, _origin(draft))
             if row is not None:
                 mine = (row["chat_id"], row["message_id"]) == (chat_id, message_id)
@@ -386,7 +395,7 @@ def _origin(draft):
     return f"file:{file_id}" if draft.source in FILES and file_id else None
 
 
-def _unique(drafts):
+def unique(drafts):
     """Una volta sola ciascuno, nell'ordine dato: un link ripetuto nel messaggio conta una volta."""
     seen, out = set(), []
     for draft in drafts:
@@ -403,6 +412,8 @@ def _values(draft):
     link = parse_link(draft.url) if draft.source == "link" else None
     return {"source": draft.source, "url": link and link.url, "platform": link and link.platform,
             "site": link and link.site, "title": draft.title, "note": draft.note or None,
+            "kind": draft.kind, "topics": json.dumps(list(draft.topics), ensure_ascii=False) if draft.topics else None,
+            "summary": draft.summary,
             "media": json.dumps(draft.media, ensure_ascii=False) if draft.media else None,
             "extraction": "complete" if draft.source == "note" else "pending"}
 

@@ -16,10 +16,11 @@ confermato in fretta: dopo 15 s senza ack risponde il Worker); prova di contratt
 (`tests/contract.py`) e giro dal telefono con il Worker pubblicato; prova MTProto
 (`spikes/mtproto.py`: un file oltre i 20 MB scaricato con il webhook attivo, 1,1 MB/s).
 
-Passo 4.2, prima parte fatta: coppermind con catalogo, salvataggio idempotente nella stessa
-transazione del cambio di stato, ricerca con filtri esatti e testo (FTS5); note, link e
-riferimenti ai file salvati davvero, con la risposta scritta dopo il commit. Prossima parte:
-Claude (Haiku) per intenzione e classificazione, poi le domande con strumenti di sola lettura.
+Passo 4.2: fatti coppermind (catalogo, salvataggio idempotente nella stessa transazione del
+cambio di stato, ricerca con filtri esatti e testo FTS5; note, link e riferimenti ai file
+salvati davvero, con la risposta scritta dopo il commit) e Claude (Haiku) che distingue ciò che
+va custodito dalle domande e descrive ogni elemento. Prossima parte: le domande, con strumenti
+di sola lettura e il filo degli ultimi scambi.
 
 ## Struttura
 
@@ -31,6 +32,8 @@ Claude (Haiku) per intenzione e classificazione, poi le domande con strumenti di
   coppermind
 - `sazed_agent/intake.py`: da un messaggio Telegram agli elementi da salvare (note, link dalle
   entità in UTF-16, file), più i comandi sconosciuti
+- `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale, risposte strutturate): intenzione
+  e descrizione degli elementi, controllate prima dell'uso; errori come quelli di Telegram
 - `sazed_agent/messages.py`: tutti i testi per l'utente, in italiano e inglese
 - `sazed_agent/lanes.py`: le due corsie (comandi, acquisizione), stati, tentativi, reazioni,
   e la risposta al salvataggio (`acquired_text`)
@@ -39,7 +42,8 @@ Claude (Haiku) per intenzione e classificazione, poi le domande con strumenti di
   configurazione); il token non compare mai nei messaggi di errore
 - `sazed_agent/__main__.py`: `python3 -m sazed_agent check` e `run` (istanza unica per `data/`)
 - `tests/`: test con `unittest`, senza rete; `fake_worker.py` e `fake_telegram.py` sono un
-  finto sazed-bot e un finto Telegram, `test_flow.py` prova il giro completo. `contract.py`
+  finto sazed-bot e un finto Telegram, `fake_claude.py` una finta API di Claude, `test_flow.py`
+  prova il giro completo. `contract.py`
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
@@ -99,6 +103,13 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   migrazione e il suo test, e un database più recente del codice si rifiuta.
 - La risposta al salvataggio si costruisce da ciò che coppermind contiene dopo il commit
   (`outcomes`), mai da ciò che si voleva salvare: dopo un arresto è la stessa.
+- Claude vede solo le parole dell'utente e i dati che il codice ha di ogni elemento, mai il
+  contenuto dietro un link o dentro un file (quando arriverà, sarà un dato, non istruzioni).
+  La sua risposta è strutturata e si controlla: un messaggio con link o file si custodisce
+  sempre; con un rifiuto o una risposta inutilizzabile si salva senza descrizione. Non si
+  chiede due volte: l'interpretazione si annota nel registro appena arriva. Niente
+  `temperature` né prefill; l'impegno (`effort`) è "low", il ragionamento resta quello
+  adattivo predefinito. Nei log solo intenzione e token, mai il testo.
 - Backup del database a caldo con l'API di backup di SQLite, mai copiando il file in uso.
 - Nominatim: al massimo una richiesta al secondo, con un User-Agent esplicito.
 - Il repository è pubblico: niente che permetta di raggiungere un'istanza (indirizzo del
