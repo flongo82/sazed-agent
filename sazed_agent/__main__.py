@@ -124,6 +124,7 @@ def main(argv=None):
     commands.add_parser("run", help="si collega al Worker e registra i messaggi")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # scrive ogni indirizzo: i link dell'utente non vanno nei log
     try:
         if args.command == "check":
             check(args.config)

@@ -75,7 +75,7 @@ never the name of the platform or the site;
 - summary: one or two sentences on what it is about; null if the content says too little.
 When partial is true, part of the source could not be read (the audio of a video, for example): \
 describe only what you see. Write title, topics and summary in the language whose ISO 639-1 \
-code is given."""
+code is given, even when the content is in another language: translate the title if needed."""
 
 ANSWER = """You are sazed, the keeper of one person's knowledge base on Telegram, and you answer \
 their question or request. Use the tools to look into what they kept: search_items lists items \

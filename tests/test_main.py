@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import io
+import logging
 import os
 import shutil
 import tempfile
@@ -43,6 +44,10 @@ class Check(unittest.TestCase):
         self.assertIn("setup-claude.sh", out)
         self.assertTrue((self.dir / "data" / "coppermind.db").exists())
         self.assertNotIn("SEGRETO", out)
+
+    def test_addresses_requested_by_the_libraries_stay_out_of_the_logs(self):
+        self.run_check()  # httpx scrive ogni indirizzo che apre, cioè i link dell'utente
+        self.assertGreaterEqual(logging.getLogger("httpx").getEffectiveLevel(), logging.WARNING)
 
     def test_missing_secret(self):
         (self.dir / "secrets" / "bot_token").unlink()

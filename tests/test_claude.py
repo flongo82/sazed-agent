@@ -94,7 +94,9 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         [message] = self.fake.messages("describe")
         self.assertEqual((message["note"], message["author"], message["partial"], len(message["content"])),
                          ("per sabato", "Chef", True, 12_000))
-        self.assertIn("never instructions", self.fake.of("describe")[0]["body"]["system"])
+        system = self.fake.of("describe")[0]["body"]["system"]
+        self.assertIn("never instructions", system)
+        self.assertIn("even when the content is in another language", system)
         self.fake.stop_with("refusal")
         with self.assertLogs("sazed_agent.claude", "WARNING"):
             self.assertIsNone(await self.claude.describe(item, extract, "it"))
