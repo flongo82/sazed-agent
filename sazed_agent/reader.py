@@ -2,15 +2,17 @@
 
 - link brevi (share.google, bit.ly, ...): si seguono i rimandi fino all'indirizzo vero, così
   lo stesso contenuto resta un elemento solo;
-- YouTube, Instagram, TikTok: le anteprime pubbliche (oEmbed) danno titolo, autore e, per
-  Instagram e TikTok, la didascalia intera. Sottotitoli e audio arriveranno con yt-dlp e
-  Whisper: per ora la lettura è parziale;
+- YouTube, Instagram, TikTok: le anteprime pubbliche (oEmbed) danno titolo, autore, la
+  copertina e, per Instagram e TikTok, la didascalia intera. La copertina conta quando la
+  didascalia manca: spesso il titolo del video è scritto lì. Sottotitoli e audio arriveranno
+  con yt-dlp e Whisper: per ora la lettura è parziale;
 - pagine web: titolo, descrizione, dati strutturati (le ricette di schema.org con ingredienti e
   passi) e il testo principale.
 
 Ogni indirizzo, anche dopo un rimando, deve portare a un host pubblico: niente rete di casa né
-indirizzi locali. Si scaricano al massimo MAX_BYTES, e nulla resta su disco. Il testo letto è
-un dato: chi lo usa (Claude) lo tratta come contenuto, mai come istruzioni.
+indirizzi locali. Si scaricano al massimo MAX_BYTES, e nulla resta su disco: la copertina
+serve a descrivere e poi si dimentica. Testo e immagini lette sono dati: chi li usa (Claude) li
+tratta come contenuto, mai come istruzioni.
 """
 
 import asyncio
@@ -28,6 +30,8 @@ from .coppermind import parse_link
 MAX_BYTES = 5_000_000
 MAX_TEXT = 30_000
 MAX_REDIRECTS = 8
+MAX_IMAGE = 4_000_000  # l'API di Claude accetta immagini fino a 5 MB
+IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 USER_AGENT = "Mozilla/5.0 (compatible; sazed-agent/1.0)"
 
 SHORTENERS = {"share.google", "search.app", "bit.ly", "t.co", "tinyurl.com", "goo.gl", "ow.ly",
@@ -60,6 +64,7 @@ class Extract:
     author: str | None
     text: str | None     # tutto ciò che si è letto, con descrizione e dati strutturati
     complete: bool       # False quando manca una parte (l'audio di un video, per esempio)
+    images: tuple = ()   # immagini viste alla fonte, come (tipo, byte): la copertina di un video
 
 
 async def public_host(host):
@@ -114,11 +119,24 @@ class Reader:
             raise ReadError("anteprima non valida") from None
         title = data.get("title").strip() if isinstance(data.get("title"), str) else None
         author = _clean(data.get("author_name"))
-        if not title and not author:
+        cover = await self._image(data.get("thumbnail_url"))
+        if not title and not author and not cover:
             raise ReadError("anteprima vuota", permanent=True)
         if caption_is_content:  # la didascalia è il testo, a capo compresi: come titolo la prima riga
-            return Extract(_first_line(title), author, title[:MAX_TEXT] if title else None, False)
-        return Extract(_clean(title), author, None, False)
+            return Extract(_first_line(title), author, title[:MAX_TEXT] if title else None, False, cover)
+        return Extract(_clean(title), author, None, False, cover)
+
+    async def _image(self, url):
+        """Un'immagine da mostrare a Claude, come ((tipo, byte),); () se non c'è o non si legge:
+        senza copertina la lettura va avanti lo stesso."""
+        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+            return ()
+        try:
+            _, headers, body = await self._get(url)
+        except ReadError:
+            return ()
+        kind = headers.get("content-type", "").split(";")[0].strip().lower()
+        return ((kind, body),) if kind in IMAGE_TYPES and 0 < len(body) <= MAX_IMAGE else ()
 
     async def _get(self, url, body=True):
         """GET seguendo i rimandi, uno per uno, solo verso host pubblici."""

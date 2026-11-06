@@ -23,8 +23,8 @@ non un caso a sé. 👍 appena arriva e nessuna risposta per ciò che si custodi
 che cosa servono le parole nel filo degli ultimi messaggi (nota, commento a un elemento anche
 del messaggio prima, domanda); le domande hanno risposta con due strumenti di sola lettura,
 dopo la lettura dei link di cui parlano. Passo 4.3 in parte: corsia di lettura dei link (link
-brevi, pagine con dati strutturati, anteprime pubbliche di Instagram, TikTok e YouTube) e
-descrizione dal contenuto. Prossima parte: sottotitoli e audio dei video, vocali.
+brevi, pagine con dati strutturati, anteprime pubbliche di Instagram, TikTok e YouTube con
+la copertina) e descrizione dal contenuto e dalla copertina. Prossima parte: sottotitoli e audio dei video, vocali.
 
 ## Struttura
 
@@ -37,7 +37,8 @@ descrizione dal contenuto. Prossima parte: sottotitoli e audio dei video, vocali
 - `sazed_agent/intake.py`: da un messaggio Telegram a link e file da custodire (link dalle
   entità in UTF-16), le parole a parte, il messaggio a cui risponde, i comandi sconosciuti
 - `sazed_agent/reader.py`: la lettura dei link (httpx): link brevi, pagine (titolo, meta,
-  JSON-LD, testo principale), anteprime oEmbed; solo host pubblici, al massimo 5 MB
+  JSON-LD, testo principale), anteprime oEmbed con la copertina (per Claude, mai su disco);
+  solo host pubblici, al massimo 5 MB
 - `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale): interpret (a che cosa servono le
   parole, nel filo), describe (dal contenuto letto), answer (strumenti di sola lettura su
   coppermind); risposte strutturate controllate prima dell'uso; errori come quelli di Telegram

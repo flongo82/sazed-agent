@@ -8,7 +8,8 @@ strutturate, dal prompt di sistema) e "answer" (con gli strumenti). Per ciascuno
   tool(nome, input) per chiedere uno strumento;
 - per difetto: le parole accompagnano gli elementi del messaggio o sono una nota, la
   descrizione riprende il titolo letto, la risposta è "ecco la risposta.".
-fail(stato, ...) fa fallire le prossime richieste; stop_with(motivo) chiude la prossima con quello
+Un messaggio con immagini ha il testo nell'ultimo blocco: images(richiesta) dà i blocchi delle
+immagini. fail(stato, ...) fa fallire le prossime richieste; stop_with(motivo) chiude la prossima con quello
 stop_reason (per esempio "refusal"). Ogni richiesta resta in requests, con il suo compito.
 """
 
@@ -39,6 +40,15 @@ def description(kind="article", title=None, topics=(), summary=None):
 
 def tool(name, arguments):
     return {"tool": name, "input": arguments}
+
+
+def text_of(content):
+    return content if isinstance(content, str) else content[-1]["text"]
+
+
+def images(request):
+    content = request["body"]["messages"][0]["content"]
+    return [] if isinstance(content, str) else [b for b in content if b["type"] == "image"]
 
 
 DEFAULTS = {
@@ -88,7 +98,7 @@ class FakeClaude:
 
     def messages(self, task):
         """I primi messaggi dell'utente delle richieste di un compito, decodificati."""
-        return [json.loads(r["body"]["messages"][0]["content"]) for r in self.of(task)]
+        return [json.loads(text_of(r["body"]["messages"][0]["content"])) for r in self.of(task)]
 
     def _handle(self, handler):
         body = json.loads(handler.rfile.read(int(handler.headers["content-length"])))
@@ -117,7 +127,7 @@ class FakeClaude:
             else:
                 content, reason = [{"type": "text", "text": reply}], "end_turn"
         else:
-            message = json.loads(body["messages"][-1]["content"])
+            message = json.loads(text_of(body["messages"][-1]["content"]))
             content = [{"type": "text", "text": json.dumps(self._answers[task](message), ensure_ascii=False)}]
             reason = "end_turn"
         self._send(handler, 200, {

@@ -193,6 +193,19 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.claude.of("interpret"), [])  # un link senza parole non chiede nulla
         self.assertEqual((self.replies(), self.reactions()), ([], ["👍"]))
 
+    async def test_a_reel_without_caption_is_described_from_its_cover(self):
+        reel, cover = "https://www.instagram.com/reel/XYZ/", "https://cdn.example.com/cover.jpg"
+        self.web.oembed("instagram", reel, {"title": "", "author_name": "pasticcere", "thumbnail_url": cover})
+        self.web.route(cover, 200, b"\xff\xd8jpeg", {"content-type": "image/jpeg"})
+        p = self.with_claude(reads=True)
+        self.claude.on("describe", lambda m: fake_claude.description("recipe", "Torta di mele definitiva", ["mele"]))
+        await self.handle(update(1, reel), processor=p)
+        await self.until(lambda: self.items()[0].extraction == "partial")
+        item = self.items()[0]
+        self.assertEqual((item.kind, item.title, item.content), ("recipe", "Torta di mele definitiva", None))
+        self.assertEqual(len(fake_claude.images(self.claude.of("describe")[0])), 1)
+        self.assertEqual(self.reactions(), ["👍"])
+
     async def test_an_unreadable_link_gets_a_shrug(self):
         self.web.route("https://example.com/via", 410)
         p = self.processor(reads=True)

@@ -80,6 +80,30 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((extract.title, extract.author, extract.complete), ("RICETTA QUA SOTTO", "pasticcere", False))
         self.assertIn("160 g zucchero", extract.text)
 
+    async def test_a_reel_without_caption_gives_its_cover(self):
+        url = "https://www.instagram.com/reel/XYZ/"
+        cover = "https://cdn.example.com/cover.jpg"
+        self.web.oembed("instagram", url, {"title": "", "author_name": "pasticcere", "thumbnail_url": cover})
+        self.web.route(cover, 200, b"\xff\xd8jpeg", {"content-type": "image/jpeg"})
+        extract = await self.reader.read(url)
+        self.assertEqual((extract.title, extract.author, extract.text, extract.images),
+                         (None, "pasticcere", None, (("image/jpeg", b"\xff\xd8jpeg"),)))
+
+    async def test_a_cover_that_cannot_be_seen_is_left_out(self):
+        url = "https://www.instagram.com/reel/XYZ/"
+        cases = [("https://cdn.example.com/via.jpg", None), ("https://cdn.example.com/pagina", "text/html"),
+                 ("javascript:alert(1)", None), (7, None)]
+        for cover, kind in cases:
+            with self.subTest(cover):
+                self.web.oembed("instagram", url, {"title": "Torta", "thumbnail_url": cover})
+                if kind:
+                    self.web.route(cover, 200, b"<html>", {"content-type": kind})
+                extract = await self.reader.read(url)
+                self.assertEqual((extract.title, extract.images), ("Torta", ()))
+        self.web.oembed("instagram", url, {"title": "", "thumbnail_url": "https://cdn.example.com/via.jpg"})
+        with self.assertRaisesRegex(ReadError, "anteprima vuota"):
+            await self.reader.read(url)
+
     async def test_youtube_gives_title_and_channel(self):
         url = "https://www.youtube.com/watch?v=abc"
         self.web.oembed("youtube", url, {"title": "Carbonara perfetta", "author_name": "Chef"})
@@ -123,6 +147,11 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ReadError, "non pubblico"):
             await reader.read("https://example.com/r")  # nemmeno dopo un rimando
         self.assertEqual(self.web.requests, ["https://example.com/r"])
+        reel = "https://www.instagram.com/reel/XYZ/"
+        self.web.oembed("instagram", reel, {"title": "Torta", "thumbnail_url": "http://192.168.1.1/c.jpg"})
+        reader.allow = lambda host: public_host(host) if host != "www.instagram.com" else _true()
+        self.assertEqual((await reader.read(reel)).images, ())  # nemmeno la copertina
+        self.assertNotIn("http://192.168.1.1/c.jpg", self.web.requests)
 
     async def test_only_web_addresses(self):
         with self.assertRaisesRegex(ReadError, "non leggibile"):

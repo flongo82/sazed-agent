@@ -10,7 +10,7 @@ from sazed_agent.claude import Claude, ClaudeError, Classification, Interpretati
 from sazed_agent.coppermind import Coppermind, Draft
 from sazed_agent.journal import Journal
 from sazed_agent.reader import Extract
-from tests.fake_claude import KEY, FakeClaude, description, interpretation, tool
+from tests.fake_claude import KEY, FakeClaude, description, images, interpretation, tool
 
 
 class ClaudeTest(unittest.IsolatedAsyncioTestCase):
@@ -100,6 +100,19 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         self.fake.stop_with("refusal")
         with self.assertLogs("sazed_agent.claude", "WARNING"):
             self.assertIsNone(await self.claude.describe(item, extract, "it"))
+
+    async def test_describing_looks_at_the_images_seen_at_the_source(self):
+        self.fake.on("describe", lambda m: description("recipe", "Torta di mele definitiva", ["mele"]))
+        extract = Extract(None, "pasticcere", None, False, (("image/jpeg", b"\xff\xd8jpeg"),))
+        got = await self.claude.describe(self.link, extract, "it")
+        self.assertEqual(got.title, "Torta di mele definitiva")
+        [request] = self.fake.of("describe")
+        self.assertEqual(images(request), [{"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg", "data": "/9hqcGVn"}}])
+        self.assertEqual(request["body"]["messages"][0]["content"][-1]["type"], "text")  # prima le immagini
+        [message] = self.fake.messages("describe")
+        self.assertEqual((message["images"], message["author"], message["content"]), (1, "pasticcere", ""))
+        self.assertIn("cover of a video", request["body"]["system"])
 
     async def test_an_answer_can_search_and_read_items(self):
         self.memory.read_done(self.old.id, "complete", content="guanciale, uova, pecorino", title="Carbonara",

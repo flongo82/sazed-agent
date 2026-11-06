@@ -351,7 +351,7 @@ class Processor:
                 self.wake["answers"].set()
             return
         description = None
-        if self.claude is not None and (extract.text or extract.title):
+        if self.claude is not None and (extract.text or extract.title or extract.images):
             try:
                 description = await self.claude.describe(item, extract, self._item_language(item))
             except ClaudeError as err:
