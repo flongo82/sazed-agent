@@ -7,7 +7,7 @@ import unittest
 from sazed_agent.messages import MESSAGES, STATUS_COMMANDS, messages_for
 
 # Argomenti di prova per i testi che non accettano una stringa qualunque.
-SAMPLES = {"date": (3, 11)}
+SAMPLES = {"failed": (2,)}
 
 
 def shape(block):
@@ -53,12 +53,9 @@ class Catalog(unittest.TestCase):
                          "Elementi custoditi: 40.")
         self.assertEqual(en["status"]("Custode", 2, 1, 40),
                          "the Custode agent is connected. Messages to process: 2, failed: 1. Items kept: 40.")
-        self.assertEqual(it["saved"](it["file"]("photo") + it["and"] + it["link"]("YouTube")),
-                         "ho salvato la foto e il link di YouTube.")
-        self.assertEqual(en["saved"](en["links"](3)), "I saved the 3 links.")
-        self.assertEqual((it["date"](3, 11), it["date"](1, 1, 2025)), ("3 novembre", "1 gennaio 2025"))
-        self.assertEqual((en["date"](3, 11), en["date"](31, 12, 2025)), ("3 November", "31 December 2025"))
-        self.assertEqual((it["file"]("sconosciuto"), en["file"]("unknown")), ("il file", "the file"))
+        self.assertEqual((it["unknown_command"]("/aiuto"), en["unknown_command"]("/help")),
+                         ("non conosco il comando /aiuto.", "I don't know the command /help."))
+        self.assertEqual(it["no_answer"], "non sono riuscito a rispondere a questa domanda: riprova tra poco.")
         self.assertEqual(it["failed"](5),
                          "non sono riuscito a elaborare questo messaggio dopo 5 tentativi: lo tengo da parte.")
 

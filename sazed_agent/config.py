@@ -22,9 +22,9 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Reactions:
-    received: str
-    done: str
-    failed: str
+    received: str     # appena il messaggio arriva: preso in carico
+    failed: str       # messo da parte dopo i tentativi
+    unreadable: str   # la fonte di un link non si è potuta leggere
 
 
 @dataclass(frozen=True)
@@ -138,8 +138,8 @@ def load(path):
         telegram_api_base=_text(telegram, "api_base", "telegram.").rstrip("/"),
         reactions=Reactions(
             received=_text(reactions, "received", "reactions."),
-            done=_text(reactions, "done", "reactions."),
             failed=_text(reactions, "failed", "reactions."),
+            unreadable=_text(reactions, "unreadable", "reactions."),
         ),
         ping_interval=ping_interval,
         pong_timeout=pong_timeout,

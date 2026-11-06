@@ -1,10 +1,10 @@
 """Lettura di un messaggio Telegram: che cosa contiene e che cosa ne va in coppermind.
 
-Per ora senza modello: un testo senza link è una nota; ogni link è un elemento, con le parole
-che lo accompagnano come nota; un file (foto, video, vocale, audio, documento) è un elemento
-che rimanda al messaggio, con la didascalia come nota e i link della didascalia accanto.
-Il contenuto di link e file si leggerà nei passi successivi, e sarà Claude a dire se un testo
-è una domanda o qualcosa da salvare. Un comando che l'agente non conosce non si salva.
+Ogni link è un elemento, e un file (foto, video, vocale, audio, documento) è un elemento che
+rimanda al messaggio, con i link della didascalia accanto: questi si custodiscono sempre. Le
+parole (il testo senza i link, o la didascalia) restano a parte: a che cosa servono, se sono
+una nota, un commento o una domanda, lo dice Claude, o in sua assenza il codice. reply_to è il
+messaggio a cui l'utente ha risposto. Un comando che l'agente non conosce non si salva.
 """
 
 import re
@@ -20,34 +20,35 @@ MEDIA_FIELDS = ("file_id", "file_unique_id", "file_name", "mime_type", "file_siz
 
 @dataclass(frozen=True)
 class Reading:
-    drafts: tuple          # gli elementi da salvare, vuoto se non c'è nulla da custodire
+    drafts: tuple          # link e file da custodire, senza note
+    words: str | None      # le parole dell'utente, senza i link scritti per esteso
     command: str | None    # un comando che l'agente non conosce
     sent_at: int | None    # quando l'utente l'ha mandato (date di Telegram)
     edited: bool           # una modifica di un messaggio già mandato
+    reply_to: int | None = None   # il message_id del messaggio a cui risponde
 
 
 def read(update):
     edited = "message" not in update and "edited_message" in update
     msg = update.get("edited_message" if edited else "message") or {}
     sent_at = msg.get("date")
+    reply_to = (msg.get("reply_to_message") or {}).get("message_id")
     text = msg.get("text")
     if text is not None:
         first = text.split(maxsplit=1)[0] if text.strip() else ""
         if COMMAND.fullmatch(first):
-            return Reading((), first.split("@")[0], sent_at, edited)
+            return Reading((), None, first.split("@")[0], sent_at, edited, reply_to)
         words, links = _split(text, msg.get("entities"))
-        drafts = [Draft("link", url=url, note=words) for url in links] or [Draft("note", note=words)]
-        return Reading(tuple(d for d in drafts if d.url or d.note), None, sent_at, edited)
+        return Reading(tuple(Draft("link", url=url) for url in links), words, None, sent_at, edited, reply_to)
     for source in FILES:
         if msg.get(source):
             words, links = _split(msg.get("caption") or "", msg.get("caption_entities"))
             file = msg[source][-1] if source == "photo" else msg[source]  # la foto più grande
             media = {k: file[k] for k in MEDIA_FIELDS if file.get(k) is not None}
             title = (file.get("title") or file.get("file_name")) if source in ("audio", "document") else None
-            drafts = [Draft(source, note=words, title=title, media=media)]
-            drafts += [Draft("link", url=url, note=words) for url in links]
-            return Reading(tuple(drafts), None, sent_at, edited)
-    return Reading((), None, sent_at, edited)
+            drafts = [Draft(source, title=title, media=media)] + [Draft("link", url=url) for url in links]
+            return Reading(tuple(drafts), words, None, sent_at, edited, reply_to)
+    return Reading((), None, None, sent_at, edited, reply_to)
 
 
 def _split(text, entities):

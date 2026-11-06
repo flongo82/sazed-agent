@@ -1,0 +1,137 @@
+"""Il lettore contro un finto web: link brevi, anteprime delle piattaforme, pagine, errori."""
+
+import unittest
+
+from sazed_agent.reader import MAX_BYTES, Reader, ReadError, page, public_host
+from tests.fake_web import FakeWeb, allow_all
+
+RECIPE = """<html><head><title>Torta di mele | Cucina</title>
+<meta property="og:title" content="Torta di mele della nonna">
+<meta name="description" content="Soffice, con la cannella.">
+<script type="application/ld+json">{"@context": "https://schema.org", "@graph": [
+ {"@type": "WebSite", "name": "Cucina"},
+ {"@type": "Recipe", "name": "Torta di mele", "recipeIngredient": ["3 uova", "250 g farina", "2 mele"],
+  "recipeInstructions": [{"@type": "HowToStep", "text": "Sbatti le uova."},
+                         {"@type": "HowToSection", "itemListElement": [{"@type": "HowToStep", "text": "Inforna."}]}],
+  "author": {"@type": "Person", "name": "Nonna Pina"}}]}</script>
+<script>var tracking = "da non leggere";</script></head>
+<body><nav><ul><li>Home</li><li>Ricette dolci e salate, tutte le categorie del sito</li></ul></nav>
+<article><h1>Torta di mele</h1><p>Questa torta di mele è la ricetta di famiglia, tramandata da tre generazioni.
+<p>Il segreto è un pizzico di cannella e le mele tagliate sottili, messe a raggiera sopra l'impasto.</p>
+</article><footer><p>Tutti i diritti riservati, nessuna parte può essere copiata.</p></footer></body></html>"""
+
+
+class PageTest(unittest.TestCase):
+    def test_a_recipe_page_gives_title_author_structured_data_and_main_text(self):
+        extract = page(RECIPE)
+        self.assertEqual((extract.title, extract.author, extract.complete),
+                         ("Torta di mele della nonna", "Nonna Pina", True))
+        text = extract.text
+        self.assertTrue(text.startswith("Soffice, con la cannella.\n\nRecipe: Torta di mele\nIngredients:\n- 3 uova"))
+        self.assertIn("Steps:\n1. Sbatti le uova.\n2. Inforna.", text)
+        self.assertIn("tramandata da tre generazioni", text)
+        self.assertIn("messe a raggiera", text)
+        for left_out in ("da non leggere", "tutte le categorie", "diritti riservati"):
+            self.assertNotIn(left_out, text)  # script, menu e piè di pagina restano fuori
+
+    def test_without_article_all_long_blocks_count(self):
+        extract = page("<title>Note</title><div>Un paragrafo abbastanza lungo da essere testo vero.</div><p>ok</p>")
+        self.assertEqual((extract.title, extract.text), ("Note", "Un paragrafo abbastanza lungo da essere testo vero."))
+
+    def test_a_page_with_nothing_to_read(self):
+        with self.assertRaises(ReadError) as ctx:
+            page("<html><body><script>app()</script></body></html>")
+        self.assertTrue(ctx.exception.permanent)
+
+    def test_only_a_title_is_a_partial_reading(self):
+        extract = page("<title>Instagram</title><body><div id=root></div>")
+        self.assertEqual((extract.title, extract.text, extract.complete), ("Instagram", None, False))
+
+
+class ReaderTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.web = FakeWeb()
+        self.reader = Reader(transport=self.web.transport, allow=allow_all)
+        self.addAsyncCleanup(self.reader.close)
+
+    async def test_a_short_link_leads_to_the_true_address(self):
+        self.web.redirect("https://share.google/abc", "https://www.google.com/share.google?q=abc")
+        self.web.redirect("https://www.google.com/share.google?q=abc", "https://www.example.com/articolo", 301)
+        self.assertEqual(await self.reader.resolve("https://share.google/abc"), "https://www.example.com/articolo")
+        self.assertEqual(await self.reader.resolve("https://example.com/x"), "https://example.com/x")
+        self.assertEqual(len(self.web.requests), 3)  # senza leggere la pagina; un link qualunque non si tocca
+
+    async def test_a_page_is_read_after_its_redirects(self):
+        self.web.redirect("https://example.com/r", "/ricetta")
+        self.web.page("https://example.com/ricetta", RECIPE)
+        extract = await self.reader.read("https://example.com/r")
+        self.assertEqual(extract.title, "Torta di mele della nonna")
+
+    async def test_the_charset_comes_from_the_page_when_the_server_does_not_say(self):
+        html = '<meta charset="iso-8859-1"><title>Caffè</title><p>Un caffè ristretto, perché così è più buono.'
+        self.web.route("https://example.com/c", body=html.encode("iso-8859-1"), headers={"content-type": "text/html"})
+        self.assertEqual((await self.reader.read("https://example.com/c")).title, "Caffè")
+
+    async def test_instagram_gives_its_caption_through_the_public_preview(self):
+        url = "https://www.instagram.com/reel/ABC/"
+        self.web.oembed("instagram", url, {"title": "RICETTA QUA SOTTO\nTorta di mele: 3 uova, 160 g zucchero",
+                                           "author_name": "pasticcere"})
+        extract = await self.reader.read(url)
+        self.assertEqual((extract.title, extract.author, extract.complete), ("RICETTA QUA SOTTO", "pasticcere", False))
+        self.assertIn("160 g zucchero", extract.text)
+
+    async def test_youtube_gives_title_and_channel(self):
+        url = "https://www.youtube.com/watch?v=abc"
+        self.web.oembed("youtube", url, {"title": "Carbonara perfetta", "author_name": "Chef"})
+        extract = await self.reader.read(url)
+        self.assertEqual((extract.title, extract.author, extract.text, extract.complete),
+                         ("Carbonara perfetta", "Chef", None, False))
+
+    async def test_errors_say_whether_to_try_again(self):
+        self.web.route("https://example.com/via", 410)
+        self.web.route("https://example.com/vietato", 403)
+        self.web.route("https://example.com/giu", 503)
+        self.web.route("https://example.com/doc.pdf", body=b"%PDF", headers={"content-type": "application/pdf"})
+        cases = [("https://example.com/via", True, True), ("https://example.com/vietato", True, False),
+                 ("https://example.com/giu", False, False), ("https://example.com/doc.pdf", True, False),
+                 ("https://www.youtube.com/watch?v=nessuno", True, True)]
+        for url, permanent, unavailable in cases:
+            with self.subTest(url):
+                with self.assertRaises(ReadError) as ctx:
+                    await self.reader.read(url)
+                self.assertEqual((ctx.exception.permanent, ctx.exception.unavailable), (permanent, unavailable))
+
+    async def test_endless_redirects_stop(self):
+        self.web.redirect("https://example.com/a", "https://example.com/b")
+        self.web.redirect("https://example.com/b", "https://example.com/a")
+        with self.assertRaisesRegex(ReadError, "troppi rimandi"):
+            await self.reader.read("https://example.com/a")
+
+    async def test_big_pages_are_cut(self):
+        self.web.page("https://example.com/big", "<title>Grande</title><p>" + "parola " * (MAX_BYTES // 5))
+        extract = await self.reader.read("https://example.com/big")
+        self.assertEqual(extract.title, "Grande")
+
+    async def test_no_address_inside_the_home_network(self):
+        reader = Reader(transport=self.web.transport)  # con il controllo vero degli indirizzi
+        self.addAsyncCleanup(reader.close)
+        self.web.redirect("https://example.com/r", "http://192.168.1.1/admin")
+        for url in ("http://127.0.0.1:8080/", "http://[::1]/", "http://10.0.0.5/x"):
+            with self.subTest(url), self.assertRaisesRegex(ReadError, "non pubblico"):
+                await reader.read(url)
+        reader.allow = lambda host: public_host(host) if host != "example.com" else _true()
+        with self.assertRaisesRegex(ReadError, "non pubblico"):
+            await reader.read("https://example.com/r")  # nemmeno dopo un rimando
+        self.assertEqual(self.web.requests, ["https://example.com/r"])
+
+    async def test_only_web_addresses(self):
+        with self.assertRaisesRegex(ReadError, "non leggibile"):
+            await self.reader.read("ftp://example.com/file")
+
+
+async def _true():
+    return True
+
+
+if __name__ == "__main__":
+    unittest.main()

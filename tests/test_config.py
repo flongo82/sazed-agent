@@ -37,7 +37,7 @@ class Config(unittest.TestCase):
         self.assertEqual(config.bot_name, "sazed")
         self.assertEqual(config.language, "auto")
         self.assertEqual(config.journal_path, self.dir / "data" / "coppermind.db")
-        self.assertEqual(config.reactions.received, "👀")
+        self.assertEqual((config.reactions.received, config.reactions.unreadable), ("👍", "🤷"))
         self.assertEqual(config.retry_delays, (5.0, 30.0, 120.0, 600.0, 3600.0))
 
     def test_secrets_are_trimmed(self):
@@ -126,7 +126,8 @@ class Config(unittest.TestCase):
             ('language = "auto"', 'language = "fr"', "language"),
             ("delays = [5, 30, 120, 600, 3600]", "delays = []", "retries.delays"),
             ("ping_interval = 30", "ping_interval = 0", "ping_interval"),
-            ('received = "👀"', 'received = ""', "reactions.received"),
+            ('received = "👍"', 'received = ""', "reactions.received"),
+            ('unreadable = "🤷"', 'unreadable = 1', "reactions.unreadable"),
             ("pong_timeout = 10", "pong_timeout = 30", "minore di connection.ping_interval"),
             ('model = "claude-haiku-5-5"', 'model = ""', "claude.model"),
         ]

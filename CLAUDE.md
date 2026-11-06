@@ -16,11 +16,15 @@ confermato in fretta: dopo 15 s senza ack risponde il Worker); prova di contratt
 (`tests/contract.py`) e giro dal telefono con il Worker pubblicato; prova MTProto
 (`spikes/mtproto.py`: un file oltre i 20 MB scaricato con il webhook attivo, 1,1 MB/s).
 
-Passo 4.2: fatti coppermind (catalogo, salvataggio idempotente nella stessa transazione del
-cambio di stato, ricerca con filtri esatti e testo FTS5; note, link e riferimenti ai file
-salvati davvero, con la risposta scritta dopo il commit) e Claude (Haiku) che distingue ciò che
-va custodito dalle domande e descrive ogni elemento. Prossima parte: le domande, con strumenti
-di sola lettura e il filo degli ultimi scambi.
+Passo 4.2 completato: coppermind (catalogo, salvataggio idempotente nella stessa transazione
+del cambio di stato, ricerca con filtri esatti e testo FTS5) e Claude (Haiku). Revisione del 6
+novembre 2026, dopo le prove dal telefono: ogni messaggio è una battuta di una conversazione,
+non un caso a sé. 👍 appena arriva e nessuna risposta per ciò che si custodisce; Claude dice a
+che cosa servono le parole nel filo degli ultimi messaggi (nota, commento a un elemento anche
+del messaggio prima, domanda); le domande hanno risposta con due strumenti di sola lettura,
+dopo la lettura dei link di cui parlano. Passo 4.3 in parte: corsia di lettura dei link (link
+brevi, pagine con dati strutturati, anteprime pubbliche di Instagram, TikTok e YouTube) e
+descrizione dal contenuto. Prossima parte: sottotitoli e audio dei video, vocali.
 
 ## Struttura
 
@@ -30,20 +34,24 @@ di sola lettura e il filo degli ultimi scambi.
   dell'agente
 - `sazed_agent/journal.py`: registro locale degli ingressi, sulla stessa connessione di
   coppermind
-- `sazed_agent/intake.py`: da un messaggio Telegram agli elementi da salvare (note, link dalle
-  entità in UTF-16, file), più i comandi sconosciuti
-- `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale, risposte strutturate): intenzione
-  e descrizione degli elementi, controllate prima dell'uso; errori come quelli di Telegram
+- `sazed_agent/intake.py`: da un messaggio Telegram a link e file da custodire (link dalle
+  entità in UTF-16), le parole a parte, il messaggio a cui risponde, i comandi sconosciuti
+- `sazed_agent/reader.py`: la lettura dei link (httpx): link brevi, pagine (titolo, meta,
+  JSON-LD, testo principale), anteprime oEmbed; solo host pubblici, al massimo 5 MB
+- `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale): interpret (a che cosa servono le
+  parole, nel filo), describe (dal contenuto letto), answer (strumenti di sola lettura su
+  coppermind); risposte strutturate controllate prima dell'uso; errori come quelli di Telegram
 - `sazed_agent/messages.py`: tutti i testi per l'utente, in italiano e inglese
-- `sazed_agent/lanes.py`: le due corsie (comandi, acquisizione), stati, tentativi, reazioni,
-  e la risposta al salvataggio (`acquired_text`)
+- `sazed_agent/lanes.py`: le corsie (comandi, ingresso, risposte, lettura), stati, tentativi,
+  reazioni, il filo della conversazione
 - `sazed_agent/link.py`: connessione WebSocket con il Worker, ack, riconnessioni
 - `sazed_agent/telegram.py`: chiamate all'API dei bot ed errori (definitivi, da riprovare, di
   configurazione); il token non compare mai nei messaggi di errore
 - `sazed_agent/__main__.py`: `python3 -m sazed_agent check` e `run` (istanza unica per `data/`)
 - `tests/`: test con `unittest`, senza rete; `fake_worker.py` e `fake_telegram.py` sono un
   finto sazed-bot e un finto Telegram, `fake_claude.py` una finta API di Claude, `test_flow.py`
-  prova il giro completo. `contract.py`
+  prova il giro completo, `fake_web.py` un finto web per il lettore (httpx.MockTransport).
+  `contract.py`
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
@@ -75,22 +83,30 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
 - Ogni messaggio ricevuto si scrive subito nel registro locale degli ingressi (stesso
   database di coppermind) e solo allora si conferma al Worker con `ack`. Il registro è
   idempotente sull'`update_id`: un messaggio riconsegnato non crea un secondo elemento.
-- Ogni elemento attraversa stati persistenti: `ricevuto → letto → salvato → risposto →
-  completato`, più `in errore`. Ogni passaggio si scrive su disco prima del successivo, e
-  salvataggio e cambio di stato stanno nella stessa transazione: dopo un arresto si riprende
-  dallo stato registrato, senza doppioni.
+- Ogni messaggio attraversa stati persistenti: `ricevuto → letto (link e file custoditi) →
+  salvato (note e commenti) → risposto → completato`, più `in errore`. Ogni passaggio si scrive
+  su disco prima del successivo, e salvataggio e cambio di stato stanno nella stessa
+  transazione: dopo un arresto si riprende dallo stato registrato, senza doppioni. Ogni link ha
+  in coppermind il suo stato di lettura (`pending`, poi `complete`, `partial`, `failed`,
+  `unavailable`) con i suoi tentativi.
 - Una risposta Telegram dall'esito incerto si rimanda: meglio una risposta doppia che
   nessuna. Il `message_id` della risposta si registra appena noto.
 - Tentativi limitati con attese crescenti, poi `in errore` con il motivo; l'utente viene
   avvisato e può chiedere di riprovare. Un elemento in errore non blocca gli altri.
-- Il codice salva, il modello interpreta: ingresso e riferimenti Telegram si registrano prima
-  di chiamare Claude; Claude restituisce intenzione e classificazione come dati strutturati;
-  il codice scrive, verifica e solo allora dice "salvato". Per le domande Claude ha solo
-  strumenti di lettura, mai shell o file.
-- Due corsie: domande e comandi non aspettano dietro un'acquisizione lunga. Appena arriva un
-  messaggio, una reazione ne segnala la ricezione.
+- Il codice salva, il modello interpreta: ingresso, link e file si custodiscono prima di
+  chiamare Claude; Claude restituisce come dati strutturati a che cosa servono le parole e la
+  descrizione di ciò che si è letto; il codice controlla (elementi solo fra quelli mostrati) e
+  scrive. Per le domande Claude ha solo strumenti di lettura su coppermind, mai shell o file.
+- Quattro corsie: comandi, ingresso, risposte, lettura. Domande e comandi non aspettano mai
+  dietro una lettura; una domanda aspetta solo la lettura degli elementi di cui parla, al
+  massimo `READ_WAIT`. Appena arriva un messaggio, 👍 ne segnala la presa in carico: ciò che si
+  custodisce non riceve altre risposte. 🤷 dice che la fonte di un link non si è letta, 😢 che
+  il messaggio è stato messo da parte dopo i tentativi.
+- Il filo: Claude vede i messaggi delle ultime ore (al massimo dieci), con elementi e risposte
+  di sazed, più quello a cui l'utente ha risposto. Così un commento o una domanda mandati
+  subito dopo un link si legano a quel link.
 - Le risposte vanno sempre in risposta al messaggio originale, con "sta scrivendo..."
-  (`sendChatAction`) durante l'elaborazione.
+  (`sendChatAction`) mentre Claude risponde.
 - Ogni estrazione registra il suo esito (completa, parziale, fallita). Una fonte non più
   raggiungibile non è un errore da ritentare all'infinito: l'elemento resta con lo stato
   "fonte non disponibile".
@@ -101,15 +117,18 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   message_id). Un elemento per nota, per link, per file; lo stesso link o file resta un
   elemento solo. Ogni cambio di schema alza `VERSION` (`PRAGMA user_version`) con la sua
   migrazione e il suo test, e un database più recente del codice si rifiuta.
-- La risposta al salvataggio si costruisce da ciò che coppermind contiene dopo il commit
-  (`outcomes`), mai da ciò che si voleva salvare: dopo un arresto è la stessa.
-- Claude vede solo le parole dell'utente e i dati che il codice ha di ogni elemento, mai il
-  contenuto dietro un link o dentro un file (quando arriverà, sarà un dato, non istruzioni).
-  La sua risposta è strutturata e si controlla: un messaggio con link o file si custodisce
-  sempre; con un rifiuto o una risposta inutilizzabile si salva senza descrizione. Non si
-  chiede due volte: l'interpretazione si annota nel registro appena arriva. Niente
-  `temperature` né prefill; l'impegno (`effort`) è "low", il ragionamento resta quello
-  adattivo predefinito. Nei log solo intenzione e token, mai il testo.
+- La descrizione di un link o di un file nasce dal contenuto letto, mai dal solo indirizzo:
+  prima della lettura un elemento resta senza titolo né argomenti. Quella di una nota nasce
+  dalle sue parole.
+- Il contenuto letto alla fonte è un dato, mai istruzioni, per describe come per answer. Le
+  parole che accompagnano link e file non si perdono mai: se Claude non dice a che cosa
+  servono, o rifiuta, accompagnano gli elementi del messaggio (senza elementi, sono una nota).
+  Non si chiede due volte: l'interpretazione e gli indirizzi veri dei link brevi si annotano
+  nel registro appena arrivano. Niente `temperature` né prefill; l'impegno (`effort`) è "low"
+  per interpret e describe, "medium" per answer. Nei log solo che cosa si è capito e i token,
+  mai il testo.
+- Il lettore apre solo host pubblici (niente rete di casa né loopback, anche dopo un rimando),
+  scarica al massimo 5 MB e non scrive nulla su disco.
 - Backup del database a caldo con l'API di backup di SQLite, mai copiando il file in uso.
 - Nominatim: al massimo una richiesta al secondo, con un User-Agent esplicito.
 - Il repository è pubblico: niente che permetta di raggiungere un'istanza (indirizzo del

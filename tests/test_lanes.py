@@ -1,4 +1,5 @@
-"""Le corsie: reazioni, salvataggio e risposta, /stato, tentativi, errori, ripresa dopo un arresto."""
+"""Le corsie: 👍 subito, link e file custoditi, lettura dei link, il filo della conversazione,
+risposte alle domande, /stato, tentativi, errori, ripresa dopo un arresto."""
 
 import asyncio
 import logging
@@ -9,18 +10,20 @@ import unittest
 from pathlib import Path
 
 from sazed_agent import intake
-from sazed_agent.claude import Claude
+from sazed_agent.claude import Claude, Interpretation
 from sazed_agent.config import Reactions
-from sazed_agent.coppermind import Coppermind, Draft, Item, Outcome
+from sazed_agent.coppermind import Coppermind, Draft
 from sazed_agent.journal import Journal
-from sazed_agent.lanes import Processor, acquired_text, lane_for
-from sazed_agent.messages import messages_for
+from sazed_agent.lanes import Processor, lane_for
+from sazed_agent.reader import Reader
 from sazed_agent.telegram import Telegram, TelegramError
 from tests import fake_claude
+from tests.fake_claude import interpretation, tool
 from tests.fake_telegram import TOKEN, FakeTelegram, url_entities
+from tests.fake_web import FakeWeb, allow_all
 
-SAVED_LINK_IT = "Ciao Ada, ho salvato il link. Il contenuto lo leggerò più avanti."
-PI_DAY_2025 = 1_741_953_600  # 14 marzo 2025, mezzogiorno UTC
+ARTICLE = ("<title>Torta di mele</title><article><p>Tre uova, zucchero, farina e mele: la torta della domenica, "
+           "soffice e profumata di cannella.</p></article>")
 
 
 def update(update_id, text=None, lang="it", edited=False, **fields):
@@ -47,18 +50,24 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.journal = Journal(self.dir / "coppermind.db")
         self.addCleanup(self.journal.close)
         self.memory = Coppermind(self.journal.db)
+        self.web = FakeWeb()
         self.stop = asyncio.Event()
 
-    def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None):
+    def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0):
+        reader = None
+        if reads:
+            reader = Reader(transport=self.web.transport, allow=allow_all)
+            self.addAsyncCleanup(reader.close)
         return Processor(self.journal, Telegram(self.telegram.api_base, token, timeout=5), "Custode", "auto",
-                         Reactions("👀", "👌", "😢"), delays, typing_interval=0.05, idle_wait=5.0,
-                         config_pause=30.0, memory=self.memory, claude=claude)
+                         Reactions("👍", "😢", "🤷"), delays, typing_interval=0.05, idle_wait=5.0,
+                         config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait)
 
-    def with_claude(self, key=fake_claude.KEY):
+    def with_claude(self, key=fake_claude.KEY, **options):
         """Un finto Claude, e il processore che lo usa."""
         self.claude = fake_claude.FakeClaude().start()
         self.addCleanup(self.claude.stop)
-        return self.processor(claude=Claude(key, self.claude.api_base, "claude-haiku-5-5", timeout=5, max_retries=0))
+        return self.processor(claude=Claude(key, self.claude.api_base, "claude-haiku-5-5", timeout=5, max_retries=0),
+                              **options)
 
     async def start(self, processor=None):
         processor = processor or self.processor()
@@ -88,236 +97,367 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
     def replies(self):
         return [prm["text"] for _, prm in self.telegram.ok_calls("sendMessage")]
 
-    async def answer(self, *updates, processor=None):
-        """Elabora i messaggi uno dopo l'altro e restituisce le risposte, nello stesso ordine."""
+    def reactions(self, message_id=None):
+        return [prm["reaction"][0]["emoji"] for _, prm in self.telegram.ok_calls("setMessageReaction")
+                if message_id is None or prm["message_id"] == message_id]
+
+    async def handle(self, *updates, processor=None):
+        """Elabora i messaggi uno dopo l'altro e restituisce le risposte."""
         p = await self.start(processor)
         for upd in updates:
             self.record(p, upd)
             await self.until(lambda: self.state(upd["update_id"]) == "done")
         return self.replies()
 
-    async def test_a_link_is_saved_then_answered_with_reactions(self):
-        p = await self.start()
-        self.record(p, update(1))
-        await self.until(lambda: self.state(1) == "done")
-        methods = [m for m, _ in self.telegram.ok_calls()]
-        self.assertEqual(methods, ["setMessageReaction", "sendChatAction", "sendMessage", "setMessageReaction"])
-        reactions = [c[1]["reaction"][0]["emoji"] for c in self.telegram.ok_calls("setMessageReaction")]
-        self.assertEqual(reactions, ["👀", "👌"])
-        _, sent = self.telegram.ok_calls("sendMessage")[0]
-        self.assertEqual(sent["text"], SAVED_LINK_IT)
-        self.assertEqual(sent["reply_parameters"]["message_id"], 10)
-        self.assertEqual(self.journal.get(1).reply_message_id, 9000)
+    def items(self):
+        return self.memory.search(limit=None).items[::-1]  # in ordine di arrivo
+
+    # --- 👍 e nient'altro, per ciò che si custodisce ---
+
+    async def test_a_link_gets_a_thumb_at_once_and_no_reply(self):
+        self.assertEqual(await self.handle(update(1)), [])
+        self.assertEqual([m for m, _ in self.telegram.ok_calls()], ["setMessageReaction"])
+        self.assertEqual(self.reactions(10), ["👍"])
         [item] = self.memory.of_message(42, 10)
-        self.assertEqual((item.url, item.platform, item.extraction), ("https://example.com/ricetta/1", "web", "pending"))
+        self.assertEqual((item.url, item.platform, item.note, item.extraction),
+                         ("https://example.com/ricetta/1", "web", None, "pending"))
 
-    async def test_english_user_gets_english_texts(self):
-        self.assertEqual(await self.answer(update(1, lang="en")), ["Hi Ada, I saved the link. I'll read its content later."])
+    async def test_without_claude_words_go_with_the_link_or_are_a_note(self):
+        replies = await self.handle(update(1, "https://example.com/pasta da provare"),
+                                    update(2, "riso carnaroli\nda comprare"),
+                                    update(3, voice={"file_id": "v", "file_unique_id": "V", "duration": 3}))
+        self.assertEqual(replies, [])
+        link, note, voice = self.items()
+        self.assertEqual((link.source, link.note), ("link", "da provare"))
+        self.assertEqual((note.source, note.note, note.extraction), ("note", "riso carnaroli\nda comprare", "complete"))
+        self.assertEqual(voice.source, "voice")
+        self.assertEqual(self.reactions(), ["👍", "👍", "👍"])
 
-    async def test_a_note_is_saved_as_written(self):
-        replies = await self.answer(update(1, "riso carnaroli\nda comprare"))
-        self.assertEqual(replies, ["Ciao Ada, ho salvato la tua nota."])
-        self.assertEqual(self.memory.of_message(42, 10)[0].note, "riso carnaroli\nda comprare")
-
-    async def test_platforms_and_several_links_are_named(self):
-        replies = await self.answer(update(1, "https://youtu.be/abc?si=x"),
-                                    update(2, "https://example.com/a e https://example.com/b"))
-        self.assertEqual(replies, ["Ciao Ada, ho salvato il link di YouTube. Il contenuto lo leggerò più avanti.",
-                                   "Ciao Ada, ho salvato i 2 link. Il contenuto lo leggerò più avanti."])
-
-    async def test_a_link_sent_again_is_not_duplicated_and_says_since_when(self):
-        first = update(1, "https://www.youtube.com/watch?v=abc")
-        first["message"]["date"] = PI_DAY_2025
-        replies = await self.answer(first, update(2, "https://youtu.be/abc rifallo con meno sale"))
-        self.assertEqual(replies[1], "Ciao Ada, il link di YouTube era già tra ciò che custodisco, dal 14 marzo 2025.")
-        [item] = self.memory.search(limit=None).items
-        self.assertEqual((item.message_id, item.note), (10, "rifallo con meno sale"))
+    async def test_a_link_sent_again_stays_one_item_and_keeps_the_new_words(self):
+        await self.handle(update(1, "https://www.youtube.com/watch?v=abc"), update(2, "https://youtu.be/abc meno sale"))
+        [item] = self.items()
+        self.assertEqual((item.message_id, item.note), (10, "meno sale"))
 
     async def test_a_photo_with_a_link_in_the_caption(self):
         caption = "tramonto https://example.com/scilla"
-        replies = await self.answer(update(1, photo=[{"file_id": "p", "file_unique_id": "P"}], caption=caption,
-                                           caption_entities=url_entities(caption)))
-        self.assertEqual(replies, ["Ciao Ada, ho salvato la foto e il link. Il contenuto lo leggerò più avanti."])
-        self.assertEqual([i.source for i in self.memory.of_message(42, 10)], ["photo", "link"])
+        await self.handle(update(1, photo=[{"file_id": "p", "file_unique_id": "P"}], caption=caption,
+                                 caption_entities=url_entities(caption)))
+        self.assertEqual([(i.source, i.note) for i in self.memory.of_message(42, 10)],
+                         [("photo", "tramonto"), ("link", "tramonto")])
 
-    async def test_an_edited_message_updates_its_item(self):
-        replies = await self.answer(update(1, "riso carnaroli"), update(2, "riso venere", edited=True, message_id=10))
-        self.assertEqual(replies, ["Ciao Ada, ho salvato la tua nota.", "Ciao Ada, ho aggiornato la tua nota."])
-        self.assertEqual([i.note for i in self.memory.search(limit=None).items], ["riso venere"])
+    async def test_an_edited_message_updates_its_item_without_a_reply(self):
+        replies = await self.handle(update(1, "riso carnaroli"), update(2, "riso venere", edited=True, message_id=10))
+        self.assertEqual(replies, [])
+        self.assertEqual([i.note for i in self.items()], ["riso venere"])
 
     async def test_unknown_commands_and_stickers_are_answered_but_not_saved(self):
-        replies = await self.answer(update(1, "/aiuto"), update(2, sticker={"file_id": "s", "file_unique_id": "S"}))
+        replies = await self.handle(update(1, "/aiuto"), update(2, sticker={"file_id": "s", "file_unique_id": "S"}))
         self.assertEqual(replies, ["Ciao Ada, non conosco il comando /aiuto.",
                                    "Ciao Ada, questo tipo di messaggio non so ancora custodirlo."])
         self.assertEqual(self.memory.count(), 0)
+        self.assertEqual(self.telegram.ok_calls("sendMessage")[0][1]["reply_parameters"]["message_id"], 10)
 
-    async def test_resume_after_saving_saves_nothing_twice_and_answers_the_same(self):
-        upd = update(1)
-        self.journal.record(1, upd, "acquisition")
-        self.journal.advance(1, "read")
-        with self.journal.transaction():  # arresto subito dopo il commit, prima della risposta
-            self.memory.save(42, 10, 1, intake.read(upd).drafts)
-            self.journal.advance(1, "saved")
-        await self.start()
-        await self.until(lambda: self.state(1) == "done")
-        self.assertEqual(self.replies(), [SAVED_LINK_IT])
-        self.assertEqual(self.memory.count(), 1)
+    # --- la lettura ---
 
-    async def test_claude_describes_a_note_and_the_reply_names_it(self):
-        p = self.with_claude()
-        self.claude.answer(lambda m: {"intent": "save", "question": None, "items": [
-            {"index": 0, "kind": "note", "title": "Spesa di sabato", "topics": ["Spesa", "riso"],
-             "summary": "Cose da comprare."}]})
-        replies = await self.answer(update(1, "riso carnaroli\nparmigiano"), processor=p)
-        self.assertEqual(replies, ["Ciao Ada, ho salvato la tua nota «Spesa di sabato»."])
-        self.assertEqual(self.claude.messages(), [{"language": "it", "words": "riso carnaroli\nparmigiano",
-                                                   "items": [{"index": 0, "source": "note"}]}])
-        [item] = self.memory.of_message(42, 10)
+    async def test_a_short_link_is_kept_at_its_true_address(self):
+        self.web.redirect("https://share.google/abc", "https://www.google.com/share.google?q=abc")
+        self.web.redirect("https://www.google.com/share.google?q=abc", "https://example.com/torta")
+        self.web.page("https://example.com/torta", ARTICLE)
+        p = self.processor(reads=True)
+        await self.handle(update(1, "https://share.google/abc"), update(2, "https://example.com/torta"), processor=p)
+        [item] = self.items()
+        self.assertEqual((item.url, item.message_id), ("https://example.com/torta", 10))
+        self.assertEqual(self.journal.get(1).links, {"https://share.google/abc": "https://example.com/torta"})
+
+    async def test_a_short_link_left_as_it_was_is_moved_when_read(self):
+        self.web.redirect("https://share.google/abc", "https://example.com/torta")
+        self.web.page("https://example.com/torta", ARTICLE)
+        # salvato prima che l'ingresso risolvesse i link brevi
+        [out] = self.memory.save(42, 5, 1, [Draft("link", url="https://share.google/abc")])
+        await self.start(self.processor(reads=True))
+        await self.until(lambda: self.memory.get(out.item.id).extraction == "complete")
+        self.assertEqual(self.memory.get(out.item.id).url, "https://example.com/torta")
+
+    async def test_a_link_is_read_and_described_from_its_content(self):
+        self.web.page("https://example.com/torta", ARTICLE)
+        p = self.with_claude(reads=True)
+        self.claude.on("describe", lambda m: fake_claude.description("recipe", "Torta di mele", ["mele", "uova"],
+                                                                     "Una torta soffice."))
+        await self.handle(update(1, "https://example.com/torta"), processor=p)
+        await self.until(lambda: self.items()[0].extraction == "complete")
+        item = self.items()[0]
         self.assertEqual((item.kind, item.title, item.topics, item.summary),
-                         ("note", "Spesa di sabato", ["spesa", "riso"], "Cose da comprare."))
-        self.assertEqual(self.memory.search("sabato").total, 1)  # titolo e argomenti si cercano
+                         ("recipe", "Torta di mele", ["mele", "uova"], "Una torta soffice."))
+        self.assertIn("profumata di cannella", item.content)
+        self.assertEqual(self.claude.messages("describe")[0]["language"], "it")
+        self.assertEqual(self.claude.of("interpret"), [])  # un link senza parole non chiede nulla
+        self.assertEqual((self.replies(), self.reactions()), ([], ["👍"]))
 
-    async def test_a_question_waits_for_its_answer_and_nothing_is_saved(self):
-        p = self.with_claude()
-        self.claude.answer(lambda m: {"intent": "question", "question": "Dove ho messo la carbonara?", "items": []})
-        replies = await self.answer(update(1, "dove ho messo la carbonara?"), update(2, "where?", lang="en"),
-                                    processor=p)
-        self.assertEqual(replies, ["Ciao Ada, alle domande saprò rispondere presto: per ora non ho salvato nulla.",
-                                   "Hi Ada, I'll be able to answer questions soon: for now I haven't saved anything."])
-        self.assertEqual(self.memory.count(), 0)
-        self.assertEqual(self.journal.get(1).interpretation["question"], "Dove ho messo la carbonara?")
-        self.assertEqual([m["language"] for m in self.claude.messages()], ["it", "en"])
+    async def test_an_unreadable_link_gets_a_shrug(self):
+        self.web.route("https://example.com/via", 410)
+        p = self.processor(reads=True)
+        await self.handle(update(1, "https://example.com/via"), processor=p)
+        await self.until(lambda: self.reactions(10) == ["👍", "🤷"])
+        item = self.items()[0]
+        self.assertEqual((item.extraction, item.read_error), ("unavailable", "la fonte non c'è più (HTTP 410)"))
+        self.assertEqual(self.replies(), [])
 
-    async def test_a_link_with_a_question_is_saved_and_the_question_waits(self):
+    async def test_a_reading_that_keeps_failing_is_retried_then_given_up(self):
+        self.web.route("https://example.com/giu", 503)
+        p = self.processor(reads=True)
+        await self.handle(update(1, "https://example.com/giu"), processor=p)
+        await self.until(lambda: self.reactions(10) == ["👍", "🤷"])
+        self.assertEqual(self.items()[0].extraction, "failed")
+        self.assertEqual(self.web.requests.count("https://example.com/giu"), 3)  # due attese, tre tentativi
+
+    # --- il filo della conversazione ---
+
+    async def test_a_comment_right_after_a_link_joins_it(self):
         p = self.with_claude()
-        self.claude.answer(lambda m: {"intent": "question", "question": "La faccio stasera?", "items": [
-            {"index": 0, "kind": "recipe", "title": "Carbonara", "topics": ["uova"], "summary": None}]})
-        replies = await self.answer(update(1, "https://example.com/carbonara la faccio stasera?"), processor=p)
-        self.assertEqual(replies, ["Ciao Ada, ho salvato il link «Carbonara». Il contenuto lo leggerò più avanti. "
-                                   "Alla tua domanda saprò rispondere presto."])
-        self.assertEqual([i.kind for i in self.memory.search(kind="recipe").items], ["recipe"])
+        self.claude.on("interpret", lambda m: interpretation(
+            comment=m["current"]["words"], comment_on=[m["conversation"][-1]["items"][0]["id"]]))
+        replies = await self.handle(update(1, "https://example.com/torta"), update(2, "da fare domenica"), processor=p)
+        self.assertEqual(replies, [])
+        [link] = self.items()
+        self.assertEqual(link.note, "da fare domenica")
+        [message] = self.claude.messages("interpret")
+        [earlier] = message["conversation"]
+        self.assertEqual((earlier["message"], earlier["items"][0]["url"], message["current"]["items"]),
+                         (10, "https://example.com/torta", []))
+
+    async def test_a_link_with_a_question_is_answered_after_it_is_read(self):
+        self.web.page("https://example.com/torta", ARTICLE)
+        self.web.slow("https://example.com/torta", 0.3)
+        p = self.with_claude(reads=True)
+        self.claude.on("interpret", lambda m: interpretation(
+            question="quante uova servono?", about=[m["current"]["items"][0]["id"]]))
+        self.claude.on("answer", lambda messages: "tre uova.")
+        replies = await self.handle(update(1, "https://example.com/torta quante uova servono?"), processor=p)
+        self.assertEqual(replies, ["Ciao Ada, tre uova."])
+        [question] = self.claude.messages("answer")
+        [about] = question["items"]
+        self.assertEqual((about["reading"], question["question"]), ("complete", "quante uova servono?"))
+        self.assertIn("Tre uova", about["content"])
+        self.assertIsNone(self.items()[0].note)  # una domanda non è una nota
+        self.assertEqual(self.journal.get(1).reply_text, "tre uova.")
+        self.assertEqual(self.reactions(10), ["👍"])
+        self.assertTrue(self.telegram.ok_calls("sendChatAction"))
+
+    async def test_a_question_right_after_a_link_is_about_it(self):
+        self.web.page("https://example.com/torta", ARTICLE)
+        self.web.slow("https://example.com/torta", 0.3)
+        p = self.with_claude(reads=True)
+        self.claude.on("interpret", lambda m: interpretation(
+            question="di cosa parla?", about=[m["conversation"][-1]["items"][0]["id"]]))
+        self.claude.on("answer", lambda messages: "di una torta di mele.")
+        await self.handle(update(1, "https://example.com/torta"), update(2, "di cosa parla?"), processor=p)
+        self.assertEqual(self.replies(), ["Ciao Ada, di una torta di mele."])
+        self.assertEqual(self.claude.messages("answer")[0]["items"][0]["reading"], "complete")
+        self.assertEqual(self.telegram.ok_calls("sendMessage")[0][1]["reply_parameters"]["message_id"], 20)
+
+    async def test_the_answer_comes_back_in_the_thread(self):
+        p = self.with_claude()
+        self.claude.on("interpret", lambda m: interpretation(question=m["current"]["words"]))
+        self.claude.on("answer", lambda messages: "ne hai due.")
+        await self.handle(update(1, "quante ricette ho?"), update(2, "e di dolci?"), processor=p)
+        conversation = self.claude.messages("answer")[1]["conversation"]
+        self.assertEqual(conversation, [{"message": 10, "minutes_ago": 0, "words": "quante ricette ho?",
+                                         "sazed": "ne hai due."}])
+
+    async def test_a_reply_to_an_old_message_brings_it_into_the_thread(self):
+        p = await self.start(self.with_claude())
+        self.record(p, update(1, "https://example.com/vecchio"))
+        await self.until(lambda: self.state(1) == "done")
+        self.journal.db.execute("UPDATE inbox SET received_at = received_at - 86400 WHERE update_id = 1")
+        self.claude.on("interpret", lambda m: interpretation(question="è buona?"))
+        for upd in (update(2, "è buona?", reply_to_message={"message_id": 10}), update(3, "e questa?")):
+            self.record(p, upd)
+            await self.until(lambda: self.state(upd["update_id"]) == "done")
+        second, third = self.claude.messages("interpret")
+        self.assertEqual(([m["message"] for m in second["conversation"]], second["current"]["reply_to"]), ([10], 10))
+        self.assertEqual([m["message"] for m in third["conversation"]], [20])  # un giorno fa: fuori dal filo
+
+    async def test_a_question_does_not_wait_forever_for_a_reading(self):
+        self.web.route("https://example.com/giu", 503)
+        p = self.with_claude(reads=True, delays=(30,), read_wait=0.3)
+        self.claude.on("interpret", lambda m: interpretation(question="di cosa parla?",
+                                                             about=[m["current"]["items"][0]["id"]]))
+        await self.handle(update(1, "https://example.com/giu di cosa parla?"), processor=p)
+        self.assertEqual(self.claude.messages("answer")[0]["items"][0]["reading"], "pending")
+
+    async def test_questions_do_not_wait_behind_a_slow_reading(self):
+        self.web.page("https://example.com/lenta", ARTICLE)
+        self.web.slow("https://example.com/lenta", 2)
+        p = await self.start(self.with_claude(reads=True))
+        self.claude.on("interpret", lambda m: interpretation(question=m["current"]["words"]))
+        self.record(p, update(1, "https://example.com/lenta"))
+        await self.until(lambda: self.state(1) == "done")
+        self.record(p, update(2, "quante ricette ho?"))
+        self.record(p, update(3, "/stato"))
+        await self.until(lambda: self.state(2) == "done" and self.state(3) == "done", timeout=1.5)
+        self.assertEqual(self.items()[0].extraction, "pending")  # la lettura è ancora in corso
+        self.assertEqual(len(self.replies()), 2)  # lo stato e la risposta, mentre la lettura continua
+
+    async def test_a_question_about_a_voice_message_is_answered_at_once(self):
+        p = self.with_claude(reads=True)
+        self.claude.on("interpret", lambda m: interpretation(question="cosa dice?",
+                                                             about=[m["current"]["items"][0]["id"]]))
+        await self.handle(update(1, voice={"file_id": "v", "file_unique_id": "V"}, caption="cosa dice?"),
+                          processor=p)
+        self.assertEqual(self.replies(), ["Ciao Ada, ecco la risposta."])
 
     async def test_without_words_claude_is_not_asked(self):
         p = self.with_claude()
-        await self.answer(update(1, photo=[{"file_id": "p", "file_unique_id": "P"}]), update(2, "/aiuto"),
+        await self.handle(update(1, photo=[{"file_id": "p", "file_unique_id": "P"}]), update(2, "/aiuto"),
                           update(3, sticker={"file_id": "s", "file_unique_id": "S"}), processor=p)
         self.assertEqual(self.claude.requests, [])
         self.assertEqual(self.memory.count(), 1)
 
-    async def test_a_refusal_keeps_the_note_without_a_description(self):
+    async def test_claude_describes_a_note(self):
         p = self.with_claude()
-        self.claude.stop_with("refusal")
-        self.assertEqual(await self.answer(update(1, "una nota qualunque"), processor=p),
-                         ["Ciao Ada, ho salvato la tua nota."])
-        self.assertIsNone(self.memory.of_message(42, 10)[0].kind)
+        self.claude.on("interpret", lambda m: interpretation(note=m["current"]["words"], kind="note",
+                                                             title="Spesa di sabato", topics=["Spesa", "riso"]))
+        await self.handle(update(1, "riso carnaroli\nparmigiano"), processor=p)
+        [item] = self.items()
+        self.assertEqual((item.note, item.kind, item.title, item.topics),
+                         ("riso carnaroli\nparmigiano", "note", "Spesa di sabato", ["spesa", "riso"]))
+
+    async def test_just_saying_thanks_keeps_nothing(self):
+        p = self.with_claude()
+        self.claude.on("interpret", lambda m: interpretation())
+        self.assertEqual(await self.handle(update(1, "grazie!"), processor=p), [])
+        self.assertEqual((self.memory.count(), self.reactions()), (0, ["👍"]))
+
+    # --- Claude che manca o sbaglia ---
 
     async def test_claude_down_is_retried(self):
         p = self.with_claude()
         self.claude.fail(500)
-        self.assertEqual(await self.answer(update(1, "riso"), processor=p), ["Ciao Ada, ho salvato la tua nota."])
-        self.assertEqual((self.journal.get(1).attempts, len(self.claude.requests)), (1, 2))
+        await self.handle(update(1, "riso"), processor=p)
+        self.assertEqual((self.journal.get(1).attempts, len(self.claude.requests), self.memory.count()), (1, 2, 1))
 
-    async def test_a_rejected_claude_key_waits_without_using_attempts(self):
+    async def test_a_rejected_claude_key_waits_without_using_attempts_and_the_link_is_already_safe(self):
         p = await self.start(self.with_claude(key="sk-ant-api03-SBAGLIATA"))
-        self.record(p, update(1, "riso"))
+        self.record(p, update(1, "https://example.com/torta buona"))
         await self.until(lambda: self.journal.get(1).last_error is not None)
         entry = self.journal.get(1)
-        self.assertEqual((entry.state, entry.attempts, self.memory.count()), ("read", 0, 0))
+        self.assertEqual((entry.state, entry.attempts), ("read", 0))
+        self.assertEqual([i.url for i in self.items()], ["https://example.com/torta"])
         self.assertIn("chiave dell'API di Claude rifiutata", entry.last_error)
         self.assertNotIn("SBAGLIATA", entry.last_error)
 
+    async def test_no_answer_from_claude_says_so(self):
+        p = self.with_claude()
+        self.claude.on("interpret", lambda m: interpretation(question="?"))
+        self.claude.on("answer", lambda messages: tool("search_items", {}))
+        with self.assertLogs("sazed_agent.claude", "WARNING"):
+            replies = await self.handle(update(1, "boh?"), processor=p)
+        self.assertEqual(replies, ["Ciao Ada, non sono riuscito a rispondere a questa domanda: riprova tra poco."])
+
+    # --- ripresa dopo un arresto ---
+
     async def test_the_interpretation_is_asked_once_even_after_a_crash(self):
-        upd = update(1, "https://example.com/zucca")
+        upd = update(1, "riso e zucca")
         self.journal.record(1, upd, "acquisition")
         self.journal.advance(1, "read")
-        self.journal.set_interpretation(1, {"intent": "save", "question": None, "items": [
-            {"index": 0, "kind": "recipe", "title": "Vellutata", "topics": ["zucca"], "summary": None}]})
+        self.journal.set_interpretation(1, Interpretation(note="riso e zucca").to_dict())
         await self.start(self.with_claude())  # arresto dopo l'interpretazione, prima del salvataggio
         await self.until(lambda: self.state(1) == "done")
         self.assertEqual(self.claude.requests, [])
-        self.assertEqual(self.replies(), ["Ciao Ada, ho salvato il link «Vellutata». Il contenuto lo leggerò più avanti."])
-        self.assertEqual(self.memory.of_message(42, 10)[0].topics, ["zucca"])
+        self.assertEqual(self.items()[0].note, "riso e zucca")
 
-    async def test_status_does_not_wait_behind_a_long_acquisition(self):
-        self.telegram.slow(text_has("ho salvato"), 1.5)
-        p = await self.start()
-        self.record(p, update(1))
-        await self.until(lambda: self.state(1) == "saved")
-        self.record(p, update(2, "/stato"))
-        await self.until(lambda: self.state(2) == "done")
-        self.assertEqual(self.state(1), "saved")  # l'acquisizione è ancora in corso
-        self.assertEqual(self.telegram.ok_calls("sendMessage")[0][1]["text"],
-                         "Ciao Ada, l'agente Custode è collegato. Messaggi da processare: 1, in errore: 0. "
-                         "Elementi custoditi: 1.")
+    async def test_resume_after_the_first_save_saves_nothing_twice(self):
+        upd = update(1)
+        self.journal.record(1, upd, "acquisition")
+        with self.journal.transaction():  # arresto subito dopo aver custodito il link
+            self.memory.save(42, 10, 1, intake.read(upd).drafts)
+            self.journal.set_links(1, {})
+            self.journal.advance(1, "read")
+        await self.start()
         await self.until(lambda: self.state(1) == "done")
+        self.assertEqual((self.memory.count(), self.reactions()), (1, []))
 
-    async def test_transient_error_is_retried(self):
-        self.telegram.fail("sendMessage", 500)
-        p = await self.start()
-        self.record(p, update(1))
+    async def test_resume_after_saving_a_note_sends_nothing(self):
+        self.journal.record(1, update(1, "riso"), "acquisition")
+        with self.journal.transaction():  # arresto fra il salvataggio e la fine
+            self.memory.save(42, 10, 1, [Draft("note", note="riso")])
+            self.journal.set_interpretation(1, Interpretation(note="riso").to_dict())
+            self.journal.advance(1, "saved")
+        await self.start()
         await self.until(lambda: self.state(1) == "done")
-        self.assertEqual(self.journal.get(1).attempts, 1)
-        self.assertEqual(len(self.telegram.ok_calls("sendMessage")), 1)
-
-    async def test_retries_exhausted_the_item_fails_is_reported_and_others_go_on(self):
-        self.telegram.rule(lambda m, prm: 500 if text_has("ho salvato")(m, prm) and prm["reply_parameters"]["message_id"] == 10 else None)
-        p = await self.start()
-        self.record(p, update(1))
-        self.record(p, update(2))
-        await self.until(lambda: self.state(1) == "failed" and self.state(2) == "done")
-        self.assertEqual(self.journal.get(1).attempts, 3)  # due attese configurate, tre tentativi
-        notices = [prm["text"] for _, prm in self.telegram.ok_calls("sendMessage") if "riuscito" in prm["text"]]
-        self.assertEqual(notices, ["Ciao Ada, non sono riuscito a elaborare questo messaggio dopo 3 tentativi: "
-                                   "lo tengo da parte."])
-        reactions = [prm["reaction"][0]["emoji"] for _, prm in self.telegram.ok_calls("setMessageReaction")
-                     if prm["message_id"] == 10]
-        self.assertEqual(reactions, ["👀", "😢"])
-
-    async def test_permanent_error_fails_at_once(self):
-        self.telegram.rule(lambda m, prm: 400 if text_has("ho salvato")(m, prm) else None)
-        p = await self.start()
-        self.record(p, update(1))
-        await self.until(lambda: self.state(1) == "failed")
-        entry = self.journal.get(1)
-        self.assertEqual(entry.attempts, 1)
-        self.assertIn("errore finto 400", entry.last_error)
-        self.assertIn("dopo 1 tentativo:", [prm["text"] for _, prm in self.telegram.ok_calls("sendMessage")][0])
-
-    async def test_rate_limit_waits_as_long_as_telegram_asks(self):
-        self.telegram.fail("sendMessage", 429)
-        p = await self.start(self.processor(delays=(0.05,)))
-        self.record(p, update(1))
-        await self.until(lambda: self.journal.get(1).attempts == 1)
-        self.assertGreater(self.journal.get(1).next_attempt_at - time.time(), 0.8)  # retry_after = 1
-        await self.until(lambda: self.state(1) == "done", timeout=4)
+        self.assertEqual((self.replies(), self.memory.count()), ([], 1))
 
     async def test_resume_after_a_crash_never_resends_a_recorded_reply(self):
         # Arresto dopo l'invio della risposta e la sua annotazione, prima del cambio di stato.
-        self.journal.record(1, update(1), "acquisition")
-        self.journal.advance(1, "read")
-        self.journal.set_reply(1, 555)
-        # Arresto dopo la risposta, prima della reazione finale.
-        self.journal.record(2, update(2), "acquisition")
+        self.journal.record(1, update(1, "/aiuto"), "acquisition")
+        self.journal.advance(1, "saved")
+        self.journal.set_reply(1, 555, "non conosco il comando /aiuto.")
+        self.journal.record(2, update(2, "/aiuto"), "acquisition")
         self.journal.advance(2, "answered", reply_message_id=556)
         await self.start()
         await self.until(lambda: self.state(1) == "done" and self.state(2) == "done")
         self.assertEqual(self.telegram.ok_calls("sendMessage"), [])
         self.assertEqual(self.journal.get(1).reply_message_id, 555)
 
-    async def test_refused_reaction_does_not_block_the_message(self):
-        self.telegram.rule(lambda m, prm: 400 if m == "setMessageReaction" else None)
+    # --- comandi, tentativi, errori ---
+
+    async def test_status_counts_what_is_kept(self):
         p = await self.start()
         self.record(p, update(1))
         await self.until(lambda: self.state(1) == "done")
+        self.record(p, update(2, "/stato", lang="en"))
+        await self.until(lambda: self.state(2) == "done")
+        self.assertEqual(self.replies(), ["Hi Ada, the Custode agent is connected. Messages to process: 0, "
+                                          "failed: 0. Items kept: 1."])
+
+    async def test_transient_error_is_retried(self):
+        self.telegram.fail("sendMessage", 500)
+        await self.handle(update(1, "/aiuto"))
+        self.assertEqual(self.journal.get(1).attempts, 1)
         self.assertEqual(len(self.telegram.ok_calls("sendMessage")), 1)
+
+    async def test_retries_exhausted_the_item_fails_is_reported_and_others_go_on(self):
+        self.telegram.rule(lambda m, prm: 500 if text_has("non conosco")(m, prm)
+                           and prm["reply_parameters"]["message_id"] == 10 else None)
+        p = await self.start()
+        self.record(p, update(1, "/aiuto"))
+        self.record(p, update(2, "/aiuto"))
+        await self.until(lambda: self.state(1) == "failed" and self.state(2) == "done")
+        self.assertEqual(self.journal.get(1).attempts, 3)  # due attese configurate, tre tentativi
+        notices = [text for text in self.replies() if "riuscito" in text]
+        self.assertEqual(notices, ["Ciao Ada, non sono riuscito a elaborare questo messaggio dopo 3 tentativi: "
+                                   "lo tengo da parte."])
+        self.assertEqual(self.reactions(10), ["👍", "😢"])
+
+    async def test_permanent_error_fails_at_once(self):
+        self.telegram.rule(lambda m, prm: 400 if text_has("non conosco")(m, prm) else None)
+        p = await self.start()
+        self.record(p, update(1, "/aiuto"))
+        await self.until(lambda: self.state(1) == "failed")
+        entry = self.journal.get(1)
+        self.assertEqual(entry.attempts, 1)
+        self.assertIn("errore finto 400", entry.last_error)
+        self.assertIn("dopo 1 tentativo:", self.replies()[0])
+
+    async def test_rate_limit_waits_as_long_as_telegram_asks(self):
+        self.telegram.fail("sendMessage", 429)
+        p = await self.start(self.processor(delays=(0.05,)))
+        self.record(p, update(1, "/aiuto"))
+        await self.until(lambda: self.journal.get(1).attempts == 1)
+        self.assertGreater(self.journal.get(1).next_attempt_at - time.time(), 0.8)  # retry_after = 1
+        await self.until(lambda: self.state(1) == "done", timeout=4)
+
+    async def test_refused_reaction_does_not_block_the_message(self):
+        self.telegram.rule(lambda m, prm: 400 if m == "setMessageReaction" else None)
+        await self.handle(update(1))
+        self.assertEqual(self.memory.count(), 1)
 
     async def test_rejected_token_postpones_without_using_attempts(self):
         p = await self.start(self.processor(token="999:SBAGLIATO"))
-        self.record(p, update(1))
+        self.record(p, update(1, "/aiuto"))
         await self.until(lambda: self.journal.get(1).last_error is not None)
         entry = self.journal.get(1)
-        self.assertEqual((entry.state, entry.attempts), ("saved", 0))  # salvato: manca solo la risposta
-        self.assertEqual(self.memory.count(), 1)
+        self.assertEqual((entry.state, entry.attempts), ("saved", 0))  # manca solo la risposta
         self.assertIn("token del bot rifiutato", entry.last_error)
         self.assertGreater(entry.next_attempt_at - time.time(), 25)
 
@@ -333,11 +473,13 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("sazed_agent", level="INFO") as logs:
             p = await self.start()
             self.record(p, update(1, text="la ricetta segreta della nonna"))
-            self.record(p, update(2, text="/stato"))
-            await self.until(lambda: self.state(1) == "done" and self.state(2) == "done")
+            self.record(p, update(2, text="/aiuto"))
+            self.record(p, update(3, text="/stato"))
+            await self.until(lambda: all(self.state(n) == "done" for n in (1, 2, 3)))
         joined = "\n".join(logs.output)
-        self.assertIn("elemento 1 completato: risposta inviata", joined)
-        self.assertIn("elemento 2 completato: stato inviato", joined)
+        self.assertIn("elemento 1 completato, senza bisogno di risposta", joined)
+        self.assertIn("elemento 2 completato: risposta inviata", joined)
+        self.assertIn("elemento 3 completato: stato inviato", joined)
         self.assertNotIn("ricetta segreta", joined)  # il contenuto dei messaggi non va nei log
 
     async def test_token_never_appears_in_logs(self):
@@ -345,47 +487,13 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.telegram.fail("setMessageReaction", 400)
         with self.assertLogs("sazed_agent", level="INFO") as logs:
             p = await self.start(self.processor(delays=(0.05,)))
-            self.record(p, update(1))
+            self.record(p, update(1, "/aiuto"))
             await self.until(lambda: self.state(1) == "failed")
             await asyncio.sleep(0.2)
         joined = "\n".join(logs.output)
         self.assertIn("errore finto 500", joined)  # gli errori ci sono, il token no
         self.assertNotIn(TOKEN, joined)
         self.assertNotIn("TEST-TOKEN", joined)
-
-
-def item(source, extraction="pending", platform=None, sent_at=PI_DAY_2025):
-    return Item(id=1, chat_id=42, message_id=10, source=source, url=None, platform=platform, site=None,
-                kind=None, title=None, topics=[], summary=None, note=None, content=None, extraction=extraction,
-                place=None, latitude=None, longitude=None, taken_at=None, media={}, sent_at=sent_at, saved_at=0)
-
-
-class AcquiredText(unittest.TestCase):
-    it, en = messages_for("it"), messages_for("en")
-
-    def text(self, t, *outcomes, edited=False, year=2026):
-        reading = intake.Reading((Draft("note"),), None, None, edited)
-        return acquired_text(t, reading, list(outcomes), year)
-
-    def test_saved_and_already_kept_in_one_answer(self):
-        self.assertEqual(self.text(self.it, Outcome(item("photo"), "saved"), Outcome(item("link", platform="tiktok"), "already")),
-                         "ho salvato la foto. Il contenuto lo leggerò più avanti. "
-                         "Il link di TikTok era già tra ciò che custodisco, dal 14 marzo 2025.")
-        self.assertEqual(self.text(self.en, Outcome(item("voice"), "saved"), Outcome(item("link"), "already")),
-                         "I saved the voice message. I'll read its content later. "
-                         "The link was already among the things I keep, since 14 March 2025.")
-
-    def test_this_year_needs_no_year(self):
-        self.assertEqual(self.text(self.it, Outcome(item("document"), "already"), year=2025),
-                         "il documento era già tra ciò che custodisco, dal 14 marzo.")
-
-    def test_several_already_kept(self):
-        self.assertEqual(self.text(self.it, Outcome(item("link"), "already"), Outcome(item("link"), "already")),
-                         "2 di questi erano già tra ciò che custodisco.")
-
-    def test_an_edited_note_needs_no_reading(self):
-        self.assertEqual(self.text(self.it, Outcome(item("note", "complete"), "saved"), edited=True),
-                         "ho aggiornato la tua nota.")
 
 
 class TelegramErrors(unittest.IsolatedAsyncioTestCase):

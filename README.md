@@ -27,26 +27,33 @@ Worker answers only for an agent that is off or silent. A contract test runs the
 the real Worker code on this computer, and a probe has shown that the bot downloads through
 MTProto files beyond the Bot API's 20 MB while the webhook keeps working.
 
-Every message now ends up in coppermind: it gets 👀, is saved, then gets a reply and 👌. A note
-is kept as written; every link becomes an item of its own, with its platform (YouTube,
-Instagram, TikTok…), its site and the words around it as a note; photos, videos, voice
-messages, audio and documents are kept as references to their message in the chat. The same
-link or file sent twice stays one item, and an edited message updates its items. The reply
-("I saved the link") is written by the code after the commit, never before. Searches already
-work: complete lists with exact filters (type, platform, site, kind of input, dates) and
-full-text search that ignores accents and matches word beginnings.
+Every message gets 👍 as soon as it arrives: it has been taken in charge, and nothing else is
+said about what you keep. Every link becomes an item of its own, with its platform (YouTube,
+Instagram, TikTok…) and its site; short links (share.google, bit.ly…) are followed to their
+true address first. Photos, videos, voice messages, audio and documents are kept as references
+to their message in the chat. The same link or file sent twice stays one item, and an edited
+message updates its items. Searches work: complete lists with exact filters (kind, platform,
+site, kind of input, dates) and full-text search that ignores accents and matches word
+beginnings.
 
-Claude now reads every message that has words or links in it (Claude Haiku, through the API):
-it tells what is to be kept from what is a question, and describes each item with a kind
-(recipe, article, video, note…), a title, topics and a short summary, which coppermind indexes.
-It sees only your words and what the code knows of each item, never the content behind a link,
-and it answers as structured data that the code checks before saving: a message with links or
-files is always kept, and if Claude refuses or its answer is unusable the item is saved without
-a description. Its interpretation is recorded in the journal, so a restart never asks twice.
-Without a key the agent works as before, and every text becomes a note.
+Claude (Haiku, through the API) reads the words of each message together with the recent
+conversation, and tells what they are for: a note to keep, a comment on something you sent
+(in the same message, or a link sent just before, or a message you replied to), a question or
+a request. The code keeps notes and comments; links and files are kept in any case, before
+Claude is asked. Questions get an answer in the chat: Claude looks into coppermind with two
+read-only tools (search with exact filters and words, and one item with the text read at its
+source). A question about a link waits until that link has been read, for a few minutes at
+most.
 
-Next: questions answered from coppermind; then the agent starts reading pages, videos and files. The architecture, the reasons behind it
-and the protocol between the two parts are described in the README of `sazed-bot`.
+Links are read in a lane of their own, one at a time, so that nothing else waits for them:
+pages give their title, description, structured data (recipes with ingredients and steps) and
+main text; Instagram and TikTok give their whole caption, and YouTube its title and channel,
+through their public previews. From what was read, Claude describes each item with a kind
+(recipe, article, video, note…), a title, topics and a short summary, which coppermind
+indexes; what was read is data for it, never instructions. A source that cannot be read gets
+🤷 on its message. Next: subtitles and audio of videos, voice messages, photos and documents.
+The architecture, the reasons behind it and the protocol between the two parts are described
+in the README of `sazed-bot`.
 
 ## Getting started
 
@@ -75,7 +82,7 @@ Through MTProto the agent logs in with the bot token, never with your account: `
 
 An API key is not tied to a model: the agent names the model on every request, from the
 `[claude]` section of `config.toml` (Claude Haiku by default, the cheapest, which is plenty
-for telling notes from questions and classifying what you save). The key comes from the Claude
+for understanding your messages, describing what it reads and answering questions). The key comes from the Claude
 Console, which bills separately from a claude.ai subscription; some plans include monthly API
 credits for it. Create a key used only by this agent, so that you can revoke it on its own.
 
@@ -92,8 +99,9 @@ computer, stop it here first.
 | Part | How |
 |---|---|
 | Connection | WebSocket client towards `sazed-bot`: backlog on start, periodic `ping`, `ack` once a message is safely recorded in the local journal |
-| Reliability | Every message goes through persistent states (received, read, saved, answered, done, or failed), with limited retries; one broken item never blocks the others |
-| Agent | The code saves, the model interprets: Claude returns intent and classification as structured data, the code writes and checks; to answer questions Claude has read-only tools to search and send back saved messages |
+| Reliability | Every message goes through persistent states (received, read, saved, answered, done, or failed), and every link through its own reading state, with limited retries; one broken item never blocks the others |
+| Agent | The code saves, the model interprets: Claude says what your words are for and describes what was read, as structured data that the code checks and writes; to answer questions it has read-only tools on coppermind, and the recent conversation |
+| Links | Short links followed to their true address; pages read for title, description, structured data and main text; public previews for Instagram, TikTok and YouTube; never an address inside your home network |
 | Videos and voice messages | yt-dlp for the audio, faster-whisper on the GPU for the transcript |
 | Pages and documents | Main-text extraction; MarkItDown and Docling for PDFs and documents |
 | Photos | OCR; place and date of the shot from EXIF, with reverse geocoding on OpenStreetMap |

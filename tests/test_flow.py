@@ -35,7 +35,7 @@ class Flow(unittest.IsolatedAsyncioTestCase):
     async def run_agent(self):
         journal = Journal(self.dir / "coppermind.db")
         processor = Processor(journal, Telegram(self.telegram.api_base, fake_telegram.TOKEN, timeout=5),
-                              "Custode", "auto", Reactions("👀", "👌", "😢"), (0.05,),
+                              "Custode", "auto", Reactions("👍", "😢", "🤷"), (0.05,),
                               typing_interval=0.05, idle_wait=5.0)
         link = WorkerLink(self.worker.url, fake_worker.TOKEN, journal, lane_for, 0.5, 0.2,
                           on_recorded=processor.notify, backoff=(0.05,), jitter=lambda a, b: 1.0)
@@ -61,10 +61,10 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.worker.acks, [1, 2, 3])
         self.assertEqual(self.worker.queue, [])
         texts = {p["reply_parameters"]["message_id"]: p["text"] for _, p in self.telegram.ok_calls("sendMessage")}
-        self.assertEqual(len(texts), 3)
-        self.assertEqual(texts[10], "Ciao Ada, ho salvato il link. Il contenuto lo leggerò più avanti.")
+        self.assertEqual(list(texts), [20])  # link e nota hanno solo il 👍
         self.assertTrue(texts[20].startswith("Ciao Ada, l'agente Custode è collegato."))
-        self.assertEqual(texts[30], "Ciao Ada, ho salvato la tua nota.")
+        thumbs = {p["message_id"]: p["reaction"][0]["emoji"] for _, p in self.telegram.ok_calls("setMessageReaction")}
+        self.assertEqual(thumbs, {10: "👍", 30: "👍"})
         stop.set()
         await asyncio.wait_for(task, 5)
         journal.close()
@@ -72,7 +72,7 @@ class Flow(unittest.IsolatedAsyncioTestCase):
     async def test_restart_resumes_unfinished_work_without_new_deliveries(self):
         # Primo avvio: Telegram non risponde, il messaggio resta da elaborare nel registro.
         self.telegram.rule(lambda m, p: 500 if m == "sendMessage" else None)
-        await self.worker.push(update(1, "https://example.com"))
+        await self.worker.push(update(1, "/aiuto"))
         journal, stop, task = await self.run_agent()
         await self.until(lambda: self.worker.acks == [1] and journal.get(1).attempts >= 1)
         stop.set()

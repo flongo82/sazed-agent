@@ -99,10 +99,11 @@ def reactions(fake, update):
 
 
 def quiet(fake, seconds):
-    """Quante risposte manda fake in seconds secondi."""
-    before = len(fake.ok_calls("sendMessage"))
+    """Quante risposte e reazioni manda fake in seconds secondi."""
+    count = lambda: len(fake.ok_calls("sendMessage")) + len(fake.ok_calls("setMessageReaction"))
+    before = count()
     time.sleep(seconds)
-    return len(fake.ok_calls("sendMessage")) - before
+    return count() - before
 
 
 # ---------------------------------------------------------------- Worker e agente
@@ -234,22 +235,16 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
     print("\n# Fase 2: l'agente si collega e riceve l'arretrato")
     worker_replies = len(tg_worker.ok_calls("sendMessage"))
     agent.start()
-    wait_until(lambda: "👌" in reactions(tg_agent, first), 30)
-    check("reazioni 👀 e poi 👌", reactions(tg_agent, first) == ["👀", "👌"], reactions(tg_agent, first))
-    check("una sola risposta, in risposta al messaggio: la nota è salvata",
-          replies(tg_agent, first) == [f"{hello_it}, {it['saved'](it['note'])}"], replies(tg_agent, first))
-    check("\"sta scrivendo...\" durante l'elaborazione",
-          any(p["action"] == "typing" for _, p in tg_agent.ok_calls("sendChatAction")))
+    wait_until(lambda: reactions(tg_agent, first), 30)
+    check("la nota riceve 👍 e nessuna risposta", quiet(tg_agent, 1) == 0 and reactions(tg_agent, first) == ["👍"]
+          and replies(tg_agent, first) == [], (reactions(tg_agent, first), replies(tg_agent, first)))
     check("il /stato di prima non arriva all'agente", replies(tg_agent, status) == [])
     check("il Worker tace", len(tg_worker.ok_calls("sendMessage")) == worker_replies)
 
     print("\n# Fase 3: l'agente è collegato")
     link = message("https://example.org/risotto")
     post(link)
-    wait_until(lambda: "👌" in reactions(tg_agent, link))
-    check("un link arriva subito all'agente, che lo salva e risponde",
-          replies(tg_agent, link) == [f"{hello_it}, {it['saved'](it['link']())} {it['later'].capitalize()}"],
-          replies(tg_agent, link))
+    check("un link arriva subito all'agente, che mette 👍", wait_until(lambda: reactions(tg_agent, link)) == ["👍"])
     check("il Worker non dice nulla", replies(tg_worker, link) == [])
     status = message("/stato")
     post(status)
@@ -258,12 +253,12 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
           text == f"{hello_it}, {it['status'](BOT_NAME, 0, 0, 2)}", text)
     check("nessuna risposta di riserva dal Worker dopo l'attesa", quiet(tg_worker, 2.5) == 0)
     post(link)  # Telegram può riconsegnare un aggiornamento già consegnato
-    check("un doppione non ha una seconda risposta", quiet(tg_agent, 2) == 0 and len(replies(tg_agent, link)) == 1)
-    english = message("hello", lang="en")
+    check("un doppione non ha una seconda reazione", quiet(tg_agent, 2) == 0 and len(reactions(tg_agent, link)) == 1)
+    english = message("/help", lang="en")
     post(english)
     wait_until(lambda: replies(tg_agent, english))
     check("con l'app in inglese l'agente risponde in inglese",
-          replies(tg_agent, english) == [f"{hello_en}, {en['saved'](en['note'])}"], replies(tg_agent, english))
+          replies(tg_agent, english) == [f"{hello_en}, {en['unknown_command']('/help')}"], replies(tg_agent, english))
 
     print("\n# Fase 4: arresto ordinato")
     check("l'agente si ferma con SIGTERM", agent.stop() == 0)
@@ -280,33 +275,33 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
     check("i messaggi ad agente spento restano in coda", text.endswith("Messaggi da processare: 3."), text)
 
     print("\n# Fase 5: ripartenza, arretrato più lungo della finestra")
-    sent = len(tg_agent.ok_calls("sendMessage"))
+    sent = len(tg_agent.ok_calls("setMessageReaction"))
     agent.start()
-    wait_until(lambda: all("👌" in reactions(tg_agent, u) for u in later), 30)
+    wait_until(lambda: all(reactions(tg_agent, u) for u in later), 30)
     check("l'agente elabora tutti i messaggi rimasti in coda, uno per uno",
-          all(len(replies(tg_agent, u)) == 1 for u in later))
-    order = [p["reply_parameters"]["message_id"] for _, p in tg_agent.ok_calls("sendMessage")[sent:]]
+          all(reactions(tg_agent, u) == ["👍"] for u in later))
+    order = [p["message_id"] for _, p in tg_agent.ok_calls("setMessageReaction")[sent:]]
     check("nell'ordine in cui sono arrivati", order == [u["message"]["message_id"] for u in later], order)
     check("e nient'altro: il registro ricorda quelli già fatti", quiet(tg_agent, 1.5) == 0
-          and len(tg_agent.ok_calls("sendMessage")) == sent + 3)
+          and len(tg_agent.ok_calls("setMessageReaction")) == sent + 3)
 
     print("\n# Fase 6: arresto brusco")
     agent.stop(signal.SIGKILL)
     lost = message("scritto mentre l'agente cade")
     post(lost)
     time.sleep(1)
-    sent = len(tg_agent.ok_calls("sendMessage"))
+    sent = len(tg_agent.ok_calls("setMessageReaction"))
     agent.start()
-    wait_until(lambda: "👌" in reactions(tg_agent, lost), 30)
-    check("dopo un arresto brusco il messaggio arriva comunque", len(replies(tg_agent, lost)) == 1)
-    check("senza doppioni", quiet(tg_agent, 1.5) == 0 and len(tg_agent.ok_calls("sendMessage")) == sent + 1)
+    wait_until(lambda: reactions(tg_agent, lost), 30)
+    check("dopo un arresto brusco il messaggio arriva comunque", reactions(tg_agent, lost) == ["👍"])
+    check("senza doppioni", quiet(tg_agent, 1.5) == 0 and len(tg_agent.ok_calls("setMessageReaction")) == sent + 1)
     check("l'agente si ferma con SIGTERM", agent.stop() == 0)
 
     print("\n# Fase 7: un secondo agente si collega allo stesso Worker")
     agent.start()
     before = message("prima del secondo agente")
     post(before)
-    wait_until(lambda: "👌" in reactions(tg_agent, before), 30)
+    wait_until(lambda: reactions(tg_agent, before), 30)
     other.start()
     try:
         code = agent.process.wait(timeout=15)
@@ -316,8 +311,8 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
     check("e spiega perché", "un altro agente" in (work / "agent.log").read_text(errors="replace"))
     after = message("per il secondo agente")
     post(after)
-    wait_until(lambda: "👌" in reactions(tg_agent, after), 30)
-    check("il secondo agente riceve i messaggi nuovi", len(replies(tg_agent, after)) == 1)
+    wait_until(lambda: reactions(tg_agent, after), 30)
+    check("il secondo agente riceve i messaggi nuovi", reactions(tg_agent, after) == ["👍"])
     check("il secondo agente si ferma con SIGTERM", other.stop() == 0)
     status = message("/stato")
     post(status)

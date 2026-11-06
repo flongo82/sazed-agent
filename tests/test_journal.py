@@ -138,6 +138,37 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(self.journal.get(1).state, "read")
         self.assertFalse(self.journal.db.in_transaction)
 
+    def test_the_thread_is_the_recent_messages_of_the_chat_closest_first(self):
+        for n, (chat, at) in enumerate([(42, 100.0), (42, 900.0), (7, 950.0), (42, 990.0), (42, 1000.0)], 1):
+            self.clock.now = at
+            self.journal.record(n, update(n, chat=chat), "acquisition")
+        self.journal.record(9, update(9, "/stato"), "commands")
+        self.assertEqual([e.update_id for e in self.journal.recent(42, 1000.0, 500.0, 10)], [4, 2])
+        self.assertEqual([e.update_id for e in self.journal.recent(42, 1000.0, 0.0, 1)], [4])
+        self.assertEqual(self.journal.of_message(42, 3).update_id, 2)
+        self.assertIsNone(self.journal.of_message(42, 999))
+
+    def test_pending_includes_what_waits_for_an_attempt(self):
+        for n in (1, 2, 3):
+            self.journal.record(n, update(n), "acquisition")
+            self.journal.advance(n, "saved")
+        self.journal.retry_later(2, "x", DELAYS)
+        self.journal.advance(3, "done")
+        self.assertEqual([e.update_id for e in self.journal.due("acquisition", None, states=("saved",))], [1])
+        self.assertEqual([e.update_id for e in self.journal.pending("acquisition", ("saved",))], [1, 2])
+        self.assertEqual(self.journal.next_attempt("acquisition", ("saved",)), 1000.0)
+        self.assertIsNone(self.journal.next_attempt("acquisition", ("received",)))
+
+    def test_links_and_reply_text_are_kept(self):
+        self.journal.record(1, update(1), "acquisition")
+        self.assertEqual((self.journal.get(1).links, self.journal.get(1).reply_text), (None, None))
+        self.journal.set_links(1, {"https://share.google/a": "https://example.com/a"})
+        self.journal.set_reply(1, 77, "tre uova.")
+        self.journal.set_reply(1, 77)  # senza testo, quello di prima resta
+        entry = self.journal.get(1)
+        self.assertEqual((entry.links, entry.reply_message_id, entry.reply_text),
+                         ({"https://share.google/a": "https://example.com/a"}, 77, "tre uova."))
+
     def test_a_journal_from_before_the_interpretation_gets_its_column(self):
         old = self.dir / "vecchio.db"
         db = sqlite3.connect(old)
@@ -153,6 +184,8 @@ class JournalTest(unittest.TestCase):
         self.assertIsNone(journal.get(1).interpretation)
         journal.set_interpretation(1, {"intent": "question", "question": "dove?", "items": []})
         self.assertEqual(journal.get(1).interpretation["question"], "dove?")
+        journal.set_links(1, {})
+        self.assertEqual((journal.get(1).links, journal.get(1).reply_text), ({}, None))
 
     def test_unknown_item(self):
         with self.assertRaisesRegex(JournalError, "non è nel registro"):

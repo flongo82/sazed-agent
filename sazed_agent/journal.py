@@ -9,7 +9,9 @@ sull'update_id di Telegram.
 Stati, nell'ordine: received → read → saved → answered → done; failed da qualunque stato non
 finale. Uno stato può solo avanzare: dopo un arresto si riprende da quello registrato.
 L'interpretazione del modello si annota appena arriva (set_interpretation): dopo un arresto si
-riusa quella, senza chiederla una seconda volta.
+riusa quella, senza chiederla una seconda volta. Lo stesso vale per gli indirizzi veri dei link
+brevi (set_links) e per il testo della risposta (set_reply), che serve a tenere il filo della
+conversazione (recent).
 """
 
 import json
@@ -37,10 +39,16 @@ CREATE TABLE IF NOT EXISTS inbox (
   reply_message_id INTEGER,
   updated_at       REAL    NOT NULL,
   payload          TEXT    NOT NULL,
-  interpretation   TEXT
+  interpretation   TEXT,
+  links            TEXT,
+  reply_text       TEXT
 );
 CREATE INDEX IF NOT EXISTS inbox_due ON inbox (lane, state, next_attempt_at);
+CREATE INDEX IF NOT EXISTS inbox_chat ON inbox (chat_id, received_at);
 """
+
+# Colonne aggiunte dopo la prima versione: i registri di prima le ricevono all'avvio.
+ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT"}
 
 
 class JournalError(Exception):
@@ -62,15 +70,19 @@ class Entry:
     reply_message_id: int
     update: dict
     interpretation: dict | None
+    links: dict | None = None        # link breve → indirizzo vero
+    reply_text: str | None = None
 
 
 class Journal:
     def __init__(self, path, clock=time.time):
         self.clock = clock
         self.db = connect(path)
+        existing = {r["name"] for r in self.db.execute("PRAGMA table_info(inbox)")}
+        for column, kind in ADDED.items() if existing else ():
+            if column not in existing:
+                self.db.execute(f"ALTER TABLE inbox ADD COLUMN {column} {kind}")  # registri di prima
         self.db.executescript(SCHEMA)
-        if "interpretation" not in {r["name"] for r in self.db.execute("PRAGMA table_info(inbox)")}:
-            self.db.execute("ALTER TABLE inbox ADD COLUMN interpretation TEXT")  # registri di prima
 
     def close(self):
         self.db.close()
@@ -99,14 +111,40 @@ class Journal:
         row = self.db.execute("SELECT * FROM inbox WHERE update_id = ?", (update_id,)).fetchone()
         return _entry(row) if row else None
 
-    def due(self, lane, limit=1):
-        """Gli elementi non finali di una corsia da lavorare adesso, in ordine di arrivo."""
+    def due(self, lane, limit=1, states=None):
+        """Gli elementi non finali di una corsia da lavorare adesso, in ordine di arrivo; con
+        states, solo quelli in uno di questi stati. limit=None li restituisce tutti."""
+        where, params = _states(states)
         rows = self.db.execute(
-            "SELECT * FROM inbox WHERE lane = ? AND state NOT IN ('done', 'failed')"
+            f"SELECT * FROM inbox WHERE lane = ? AND state NOT IN ('done', 'failed'){where}"
             " AND next_attempt_at <= ? ORDER BY received_at, update_id LIMIT ?",
-            (lane, self.clock(), limit),
+            (lane, *params, self.clock(), -1 if limit is None else limit),
         ).fetchall()
         return [_entry(r) for r in rows]
+
+    def pending(self, lane, states):
+        """Tutti gli elementi di una corsia in questi stati, anche quelli che aspettano un
+        tentativo, in ordine di arrivo."""
+        where, params = _states(states)
+        rows = self.db.execute(f"SELECT * FROM inbox WHERE lane = ?{where} ORDER BY received_at, update_id",
+                               (lane, *params)).fetchall()
+        return [_entry(r) for r in rows]
+
+    def recent(self, chat_id, before, since, limit):
+        """I messaggi della chat arrivati prima di before e non prima di since, i più vicini
+        per primi, al massimo limit: il filo della conversazione."""
+        rows = self.db.execute(
+            "SELECT * FROM inbox WHERE chat_id = ? AND lane = 'acquisition' AND received_at < ?"
+            " AND received_at >= ? ORDER BY received_at DESC, update_id DESC LIMIT ?",
+            (chat_id, before, since, limit)).fetchall()
+        return [_entry(r) for r in rows]
+
+    def of_message(self, chat_id, message_id):
+        """L'ultimo ingresso di un messaggio (una modifica ne crea un altro), o None."""
+        row = self.db.execute(
+            "SELECT * FROM inbox WHERE chat_id = ? AND message_id = ? ORDER BY received_at DESC LIMIT 1",
+            (chat_id, message_id)).fetchone()
+        return _entry(row) if row else None
 
     def advance(self, update_id, state, reply_message_id=None):
         """Porta un elemento a uno stato successivo. Uno stato non torna mai indietro."""
@@ -122,13 +160,20 @@ class Journal:
                 (state, reply_message_id, self.clock(), update_id),
             )
 
-    def set_reply(self, update_id, reply_message_id):
-        """Annota il message_id della risposta appena Telegram lo restituisce."""
+    def set_reply(self, update_id, reply_message_id, text=None):
+        """Annota il message_id della risposta appena Telegram lo restituisce, e il suo testo."""
         with self.transaction():
             self.db.execute(
-                "UPDATE inbox SET reply_message_id = ?, updated_at = ? WHERE update_id = ?",
-                (reply_message_id, self.clock(), update_id),
+                "UPDATE inbox SET reply_message_id = ?, reply_text = COALESCE(?, reply_text),"
+                " updated_at = ? WHERE update_id = ?",
+                (reply_message_id, text, self.clock(), update_id),
             )
+
+    def set_links(self, update_id, links):
+        """Annota gli indirizzi veri dei link brevi del messaggio (link breve → indirizzo)."""
+        with self.transaction():
+            self.db.execute("UPDATE inbox SET links = ?, updated_at = ? WHERE update_id = ?",
+                            (json.dumps(links, ensure_ascii=False), self.clock(), update_id))
 
     def set_interpretation(self, update_id, interpretation):
         """Annota ciò che il modello ha capito del messaggio, come dizionario JSON."""
@@ -138,11 +183,13 @@ class Journal:
                 (json.dumps(interpretation, ensure_ascii=False), self.clock(), update_id),
             )
 
-    def next_attempt(self, lane):
-        """L'istante del prossimo tentativo in programma nella corsia, o None se non c'è nulla."""
+    def next_attempt(self, lane, states=None):
+        """L'istante del prossimo tentativo in programma nella corsia (con states, fra gli
+        elementi in quegli stati), o None se non c'è nulla."""
+        where, params = _states(states)
         row = self.db.execute(
-            "SELECT MIN(next_attempt_at) FROM inbox WHERE lane = ? AND state NOT IN ('done', 'failed')",
-            (lane,)).fetchone()
+            f"SELECT MIN(next_attempt_at) FROM inbox WHERE lane = ? AND state NOT IN ('done', 'failed'){where}",
+            (lane, *params)).fetchone()
         return row[0]
 
     def retry_later(self, update_id, error, delays, min_delay=0):
@@ -211,6 +258,12 @@ class Journal:
         return row[0]
 
 
+def _states(states):
+    if states is None:
+        return "", ()
+    return f" AND state IN ({', '.join('?' * len(states))})", tuple(states)
+
+
 def _entry(row):
     return Entry(
         update_id=row["update_id"], queue_id=row["queue_id"], received_at=row["received_at"],
@@ -220,4 +273,5 @@ def _entry(row):
         last_error=row["last_error"], reply_message_id=row["reply_message_id"],
         update=json.loads(row["payload"]),
         interpretation=json.loads(row["interpretation"]) if row["interpretation"] else None,
+        links=json.loads(row["links"]) if row["links"] else None, reply_text=row["reply_text"],
     )

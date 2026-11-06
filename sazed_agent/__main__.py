@@ -1,8 +1,8 @@
 """Punto d'ingresso: python3 -m sazed_agent <comando>.
 
 - check: verifica configurazione, segreti, registro e coppermind senza collegarsi a nulla;
-- run: si collega al Worker, registra e conferma i messaggi, e li elabora nelle due corsie:
-  note, link e file finiscono in coppermind.
+- run: si collega al Worker, registra e conferma i messaggi, e li elabora nelle corsie:
+  note, link e file finiscono in coppermind, i link si leggono, le domande hanno risposta.
 """
 
 import argparse
@@ -20,6 +20,7 @@ from .coppermind import Coppermind, CoppermindError
 from .journal import Journal
 from .lanes import Processor, lane_for
 from .link import Replaced, WorkerLink, agent_url
+from .reader import Reader
 from .telegram import Telegram
 
 log = logging.getLogger("sazed_agent")
@@ -75,7 +76,7 @@ def run(config_path):
         try:
             processor = Processor(journal, Telegram(config.telegram_api_base, bot_token), config.bot_name,
                                   config.language, config.reactions, config.retry_delays,
-                                  memory=Coppermind(journal.db), claude=claude_for(config))
+                                  memory=Coppermind(journal.db), claude=claude_for(config), reader=Reader())
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
                               config.pong_timeout, on_recorded=processor.notify)
             asyncio.run(serve(link, processor))
@@ -84,7 +85,8 @@ def run(config_path):
 
 
 def claude_for(config):
-    """Claude, se configurato; senza, l'agente lavora lo stesso e ogni testo diventa una nota."""
+    """Claude, se configurato; senza, l'agente custodisce lo stesso: le parole accompagnano i link
+    o diventano una nota, nulla si descrive e alle domande non si risponde."""
     try:
         return Claude(config.anthropic_api_key, config.claude.api_base, config.claude.model)
     except ConfigError as err:
@@ -109,6 +111,8 @@ async def serve(link, processor, stop=None):
     finally:
         stop.set()
         await lanes
+        if getattr(processor, "reader", None) is not None:
+            await processor.reader.close()
         log.info("agente fermato")
 
 

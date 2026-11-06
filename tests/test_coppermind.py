@@ -113,29 +113,44 @@ class Saving(Base):
         self.assertEqual((first.item.title, first.item.media["file_name"], first.item.extraction),
                          ("contratto.pdf", "contratto.pdf", "pending"))
 
-    def test_an_edit_with_new_words_drops_the_classification_but_keeps_what_was_read(self):
+    def test_a_link_keeps_what_its_reading_found_when_the_words_change(self):
         [out] = self.save(10, Draft("link", url="https://example.com/r", note="buona"))
-        self.classify(out.item.id, kind="ricetta", title="Risotto", topics='["riso"]', summary="Un risotto.",
-                      content="testo della pagina", extraction="complete")
-        self.save(10, Draft("link", url="https://example.com/r", note="buona"))  # stesse parole
-        self.assertEqual(self.memory.get(out.item.id).kind, "ricetta")
+        self.memory.read_done(out.item.id, "complete", content="testo della pagina", title="Risotto",
+                              kind="recipe", topics=("riso",), summary="Un risotto.")
         self.now += 60
-        self.save(10, Draft("link", url="https://example.com/r", note="buonissima"))
+        self.save(10, Draft("link", url="https://example.com/r", note="buonissima", kind="article", title="Altro"))
         item = self.memory.get(out.item.id)
-        self.assertEqual((item.note, item.kind, item.title, item.topics, item.summary),
-                         ("buonissima", None, None, [], None))
-        self.assertEqual((item.content, item.extraction, item.saved_at), ("testo della pagina", "complete", 5000.0))
+        self.assertEqual((item.note, item.kind, item.title, item.topics, item.summary, item.content, item.extraction),
+                         ("buonissima", "recipe", "Risotto", ["riso"], "Un risotto.", "testo della pagina", "complete"))
+        self.assertEqual(item.saved_at, 5000.0)
 
-    def test_a_new_description_replaces_the_old_one_and_no_description_keeps_it(self):
-        draft = Draft("link", url="https://example.com/r", note="buona", kind="recipe", title="Risotto",
-                      topics=("riso",), summary="Un risotto.")
+    def test_a_document_keeps_its_file_name_as_title_until_read(self):
+        [out] = self.save(10, Draft("document", title="contratto.pdf", media={"file_unique_id": "D"}))
+        self.memory.read_done(out.item.id, "complete", title="Contratto d'affitto")
+        self.save(10, Draft("document", title="contratto.pdf", media={"file_unique_id": "D"}))
+        self.assertEqual(self.memory.get(out.item.id).title, "Contratto d'affitto")
+
+    def test_a_note_description_follows_its_words(self):
+        draft = Draft("note", note="riso e parmigiano", kind="note", title="Spesa", topics=("riso",), summary="Spesa.")
         [out] = self.save(10, draft)
-        self.assertEqual((out.item.kind, out.item.title, out.item.topics), ("recipe", "Risotto", ["riso"]))
-        self.save(10, Draft("link", url="https://example.com/r", note="buona"))  # senza descrizione
-        self.assertEqual(self.memory.get(out.item.id).title, "Risotto")
-        self.save(10, Draft("link", url="https://example.com/r", note="buona", kind="article", title="Altro"))
+        self.assertEqual((out.item.kind, out.item.title, out.item.topics), ("note", "Spesa", ["riso"]))
+        self.save(10, Draft("note", note="riso e parmigiano"))  # stesse parole, senza descrizione: resta
+        self.assertEqual(self.memory.get(out.item.id).title, "Spesa")
+        self.save(10, Draft("note", note="riso, parmigiano e burro", kind="note", title="Spesa grande"))
         item = self.memory.get(out.item.id)
-        self.assertEqual((item.kind, item.title, item.topics, item.summary), ("article", "Altro", [], None))
+        self.assertEqual((item.title, item.topics, item.summary), ("Spesa grande", [], None))
+        self.save(10, Draft("note", note="solo burro"))  # parole nuove senza descrizione: decade
+        item = self.memory.get(out.item.id)
+        self.assertEqual((item.kind, item.title, item.topics, item.summary), (None, None, [], None))
+
+    def test_a_comment_sent_later_joins_the_note(self):
+        [out] = self.save(10, Draft("link", url="https://example.com/r"))
+        for _ in range(2):  # una volta sola, anche se ripetuto
+            self.assertTrue(self.memory.annotate(out.item.id, "da fare sabato"))
+        self.memory.annotate(out.item.id, "con le pere")
+        self.assertEqual(self.memory.get(out.item.id).note, "da fare sabato\ncon le pere")
+        self.assertEqual(self.memory.search("pere").total, 1)
+        self.assertFalse(self.memory.annotate(999, "nessuno"))
 
     def test_an_edit_that_changes_the_link_replaces_the_item(self):
         [old] = self.save(10, Draft("link", url="https://example.com/vecchio"))
@@ -172,6 +187,64 @@ class Saving(Base):
         self.assertEqual(self.memory.count(), 0)
 
 
+class Reading(Base):
+    def test_items_are_read_in_order_and_awaited_ones_first(self):
+        a, b, c = (self.save(n, Draft("link", url=f"https://example.com/{n}"))[0].item for n in (10, 11, 12))
+        self.save(13, Draft("voice", media={"file_unique_id": "V"}))
+        self.assertEqual(self.memory.to_read(["link"]).id, a.id)
+        self.assertEqual(self.memory.to_read(["link"], first=[c.id]).id, c.id)
+        self.assertIsNone(self.memory.to_read([]))  # nulla si legge senza un lettore
+        self.assertEqual(self.memory.to_read(["voice"]).source, "voice")
+
+    def test_a_short_link_moves_to_its_true_address_unless_taken(self):
+        short = self.save(10, Draft("link", url="https://share.google/abc"))[0].item
+        other = self.save(11, Draft("link", url="https://example.com/altro"))[0].item
+        self.assertTrue(self.memory.relink(short.id, "https://www.instagram.com/reel/R/?igsh=x"))
+        item = self.memory.get(short.id)
+        self.assertEqual((item.url, item.platform, item.site), ("https://www.instagram.com/reel/R/", "instagram",
+                                                                "instagram.com"))
+        self.assertEqual(self.save(12, Draft("link", url="https://instagram.com/reel/R"))[0].status, "already")
+        self.assertFalse(self.memory.relink(short.id, "https://example.com/altro"))
+        self.assertEqual(self.memory.get(short.id).platform, "instagram")
+        self.assertEqual(self.memory.get(other.id).url, "https://example.com/altro")
+
+    def test_a_failed_reading_waits_then_gives_up(self):
+        [out] = self.save(10, Draft("link", url="https://example.com/r"))
+        item_id = out.item.id
+        self.assertEqual(self.memory.read_failed(item_id, "HTTP 503", (10, 60)), "pending")
+        self.assertIsNone(self.memory.to_read(["link"]))
+        self.assertEqual(self.memory.next_reading(["link"]), 5010.0)
+        self.now = 5010.0
+        self.assertEqual(self.memory.to_read(["link"]).id, item_id)
+        self.assertEqual(self.memory.read_failed(item_id, "HTTP 503", (10, 60), min_delay=120), "pending")
+        self.assertEqual(self.memory.next_reading(["link"]), 5130.0)  # l'attesa chiesta conta
+        self.assertEqual(self.memory.read_failed(item_id, "HTTP 503", (10, 60)), "failed")
+        item = self.memory.get(item_id)
+        self.assertEqual((item.extraction, item.read_error), ("failed", "HTTP 503"))
+        self.assertIsNone(self.memory.next_reading(["link"]))
+
+    def test_a_vanished_source_is_final_at_once(self):
+        [out] = self.save(10, Draft("link", url="https://example.com/r"))
+        self.assertEqual(self.memory.read_failed(out.item.id, "HTTP 410", (10,), final="unavailable"), "unavailable")
+        self.assertEqual(self.memory.get(out.item.id).extraction, "unavailable")
+
+    def test_postponing_a_reading_uses_no_attempt(self):
+        [out] = self.save(10, Draft("link", url="https://example.com/r"))
+        self.memory.read_later(out.item.id, 60, "chiave rifiutata")
+        self.assertEqual(self.memory.next_reading(["link"]), 5060.0)
+        self.assertEqual(self.memory.read_failed(out.item.id, "x", (10,)), "pending")  # il primo tentativo
+
+    def test_what_was_read_is_searchable(self):
+        [out] = self.save(10, Draft("link", url="https://example.com/r"))
+        self.memory.read_done(out.item.id, "partial", content="guanciale e pecorino", title="Carbonara",
+                              kind="recipe", topics=("uova",))
+        item = self.memory.get(out.item.id)
+        self.assertEqual((item.extraction, item.title, item.kind, item.topics), ("partial", "Carbonara", "recipe", ["uova"]))
+        self.assertEqual(self.memory.search("pecorino", kind="recipe").total, 1)
+        with self.assertRaises(ValueError):
+            self.memory.read_done(out.item.id, "pending")
+
+
 class Versions(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -183,9 +256,24 @@ class Versions(unittest.TestCase):
         journal.record(7, update(1), "acquisition")
         self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 0)
         Coppermind(journal.db)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 2)
         self.assertEqual(journal.get(1).state, "received")
         Coppermind(journal.db)  # una seconda apertura non cambia nulla
+
+    def test_a_catalogue_of_version_1_learns_to_read(self):
+        journal = Journal(self.dir / "coppermind.db")
+        self.addCleanup(journal.close)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        memory.save(42, 10, 1, [Draft("link", url="https://example.com/r", note="vecchio")])
+        db = journal.db  # il catalogo com'era alla versione 1
+        db.execute("DROP INDEX items_reading")
+        for column in ("read_attempts", "next_read_at", "read_error"):
+            db.execute(f"ALTER TABLE items DROP COLUMN {column}")
+        db.execute("PRAGMA user_version = 1")
+        memory = Coppermind(db, clock=lambda: 100.0)
+        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+        item = memory.to_read(["link"])
+        self.assertEqual((item.note, item.extraction, item.read_error), ("vecchio", "pending", None))
 
     def test_a_database_from_a_newer_version_is_refused(self):
         journal = Journal(self.dir / "coppermind.db")

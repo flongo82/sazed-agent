@@ -11,6 +11,11 @@ stessi dati non crea doppioni, e rifatto dopo una modifica del messaggio lo aggi
 link, o lo stesso file, mandato una seconda volta resta un elemento solo: le parole nuove che
 lo accompagnano si aggiungono alla sua nota.
 
+La lettura di link e file è un lavoro a parte, con i suoi tentativi: ogni elemento da leggere
+ha lo stato "pending" e un istante per il prossimo tentativo (to_read, read_done, read_failed).
+Di un link o di un file la descrizione (tipo, titolo, argomenti, riassunto) nasce dal contenuto
+letto, e un nuovo salvataggio del messaggio non la tocca; di una nota nasce dalle sue parole.
+
 Ricerca: filtri esatti (tipo, piattaforma, sito, ingresso, date), che danno elenchi completi e
 il loro totale, più il testo con FTS5 (senza badare agli accenti, anche per inizio di parola).
 La ricerca per significato arriverà con gli embedding calcolati sulla GPU.
@@ -24,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-VERSION = 1
+VERSION = 2
 SOURCES = ("note", "link", "photo", "video", "video_note", "voice", "audio", "document")
 FILES = SOURCES[2:]
 EXTRACTIONS = ("pending", "complete", "partial", "failed", "unavailable")
@@ -53,11 +58,15 @@ CREATE TABLE IF NOT EXISTS items (
   media       TEXT,               -- JSON: file_id, nome, tipo, dimensione, durata
   sent_at     INTEGER NOT NULL,   -- quando l'utente l'ha mandato
   saved_at    REAL    NOT NULL,
-  updated_at  REAL    NOT NULL
+  updated_at  REAL    NOT NULL,
+  read_attempts INTEGER NOT NULL DEFAULT 0,
+  next_read_at  REAL    NOT NULL DEFAULT 0,
+  read_error    TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS items_note ON items (chat_id, message_id) WHERE origin IS NULL;
 CREATE INDEX IF NOT EXISTS items_message ON items (chat_id, message_id);
 CREATE INDEX IF NOT EXISTS items_sent ON items (sent_at);
+CREATE INDEX IF NOT EXISTS items_reading ON items (extraction, next_read_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
   title, topics, summary, note, content, url,
@@ -80,6 +89,13 @@ ON items BEGIN
 END;
 """
 
+# Da una versione dello schema alla successiva: ciò che manca a un database di prima.
+MIGRATIONS = {
+    2: ("ALTER TABLE items ADD COLUMN read_attempts INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE items ADD COLUMN next_read_at REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE items ADD COLUMN read_error TEXT"),
+}
+
 # Peso di ogni colonna di items_fts nell'ordinamento per pertinenza (bm25).
 WEIGHTS = (4.0, 3.0, 2.0, 2.0, 1.0, 1.0)
 
@@ -99,7 +115,7 @@ PLATFORMS = {
 
 # Parametri che servono solo a tracciare chi condivide: via dagli indirizzi salvati.
 TRACKING = {"fbclid", "gclid", "dclid", "msclkid", "yclid", "mc_cid", "mc_eid", "igsh", "igshid",
-            "_hsenc", "_hsmi", "mkt_tok"}
+            "_hsenc", "_hsmi", "mkt_tok", "shem"}
 PLATFORM_TRACKING = {"youtube": {"si", "feature", "pp"}, "spotify": {"si"}, "x": {"s", "t"},
                      "instagram": None, "tiktok": None}  # None: nessun parametro serve
 
@@ -149,6 +165,7 @@ class Item:
     media: dict
     sent_at: int
     saved_at: float
+    read_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,17 +227,23 @@ class Coppermind:
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version > VERSION:
             raise CoppermindError(f"database alla versione {version}, questo modulo arriva alla {VERSION}")
-        db.executescript(SCHEMA)
-        if version < VERSION:
-            db.execute(f"PRAGMA user_version = {VERSION}")
+        with transaction(db):
+            if version and db.execute("SELECT 1 FROM sqlite_master WHERE name = 'items'").fetchone():
+                for step in range(version + 1, VERSION + 1):
+                    for statement in MIGRATIONS.get(step, ()):
+                        db.execute(statement)
+            for statement in _statements(SCHEMA):
+                db.execute(statement)
+            if version < VERSION:
+                db.execute(f"PRAGMA user_version = {VERSION}")
 
     def save(self, chat_id, message_id, sent_at, drafts):
         """Salva gli elementi di un messaggio e ne restituisce l'esito, nello stesso ordine.
 
         Rifatto con gli stessi dati non cambia nulla; dopo una modifica del messaggio aggiorna
-        i suoi elementi e toglie quelli spariti. Una descrizione nuova del modello sostituisce
-        la vecchia; senza, se il messaggio cambia le parole, la vecchia decade. Il testo
-        estratto resta finché resta la fonte.
+        i suoi elementi e toglie quelli spariti. Di una nota, una descrizione nuova del modello
+        sostituisce la vecchia; senza, se cambiano le parole, la vecchia decade. Di link e file
+        la descrizione e il testo letto restano finché resta la fonte.
         """
         now = self.clock()
         drafts = unique(drafts)
@@ -236,19 +259,24 @@ class Coppermind:
                 if row is None:
                     kept.append(self.db.execute(
                         "INSERT INTO items (chat_id, message_id, source, origin, url, platform, site,"
-                        " kind, title, topics, summary, note, media, extraction, sent_at, saved_at, updated_at)"
+                        " kind, title, topics, summary, note, media, extraction, sent_at, saved_at, updated_at,"
+                        " next_read_at)"
                         " VALUES (:chat_id, :message_id, :source, :origin, :url, :platform, :site,"
-                        " :kind, :title, :topics, :summary, :note, :media, :extraction, :sent_at, :now, :now)",
+                        " :kind, :title, :topics, :summary, :note, :media, :extraction, :sent_at, :now, :now, :now)",
                         dict(values, chat_id=chat_id, message_id=message_id, origin=origin,
                              sent_at=sent_at, now=now)).lastrowid)
                     continue
                 self.db.execute(
                     "UPDATE items SET source = :source, url = :url, platform = :platform, site = :site,"
                     " media = :media, sent_at = :sent_at, updated_at = :now,"
-                    " kind = CASE WHEN :described THEN :kind WHEN note IS :note THEN kind END,"
-                    " title = CASE WHEN :described OR note IS NOT :note THEN :title ELSE title END,"
-                    " topics = CASE WHEN :described THEN :topics WHEN note IS :note THEN topics END,"
-                    " summary = CASE WHEN :described THEN :summary WHEN note IS :note THEN summary END,"
+                    " kind = CASE WHEN source != 'note' THEN kind WHEN :described THEN :kind"
+                    "  WHEN note IS :note THEN kind END,"
+                    " title = CASE WHEN source != 'note' THEN COALESCE(title, :title)"
+                    "  WHEN :described OR note IS NOT :note THEN :title ELSE title END,"
+                    " topics = CASE WHEN source != 'note' THEN topics WHEN :described THEN :topics"
+                    "  WHEN note IS :note THEN topics END,"
+                    " summary = CASE WHEN source != 'note' THEN summary WHEN :described THEN :summary"
+                    "  WHEN note IS :note THEN summary END,"
                     " note = :note WHERE id = :id",
                     dict(values, sent_at=sent_at, now=now, id=row["id"], described=draft.described))
                 kept.append(row["id"])
@@ -266,6 +294,91 @@ class Coppermind:
                 mine = (row["chat_id"], row["message_id"]) == (chat_id, message_id)
                 found.append(Outcome(_item(row), "saved" if mine else "already"))
         return found
+
+    def annotate(self, item_id, note):
+        """Aggiunge parole dell'utente alla nota di un elemento (un commento mandato dopo).
+        False se l'elemento non c'è."""
+        row = self.db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if row is None:
+            return False
+        with transaction(self.db):
+            self._add_note(row, note, self.clock())
+        return True
+
+    def relink(self, item_id, url):
+        """Porta un link al suo indirizzo vero (dietro un link breve). False, e nulla cambia, se
+        quell'indirizzo è già di un altro elemento."""
+        link = parse_link(url)
+        with transaction(self.db):
+            holder = self.db.execute("SELECT id FROM items WHERE origin = ?", ("link:" + link.key,)).fetchone()
+            if holder is not None and holder[0] != item_id:
+                return False
+            self.db.execute("UPDATE items SET url = ?, platform = ?, site = ?, origin = ?, updated_at = ?"
+                            " WHERE id = ? AND source = 'link'",
+                            (link.url, link.platform, link.site, "link:" + link.key, self.clock(), item_id))
+        return True
+
+    def to_read(self, sources, first=()):
+        """Il prossimo elemento da leggere adesso fra quelli di questi ingressi: prima quelli
+        indicati in first (una domanda li aspetta), poi in ordine di arrivo. None se nessuno."""
+        sources, first = tuple(sources), tuple(first)
+        if not sources:
+            return None
+        row = self.db.execute(
+            f"SELECT * FROM items WHERE extraction = 'pending' AND next_read_at <= ?"
+            f" AND source IN ({', '.join('?' * len(sources))})"
+            f" ORDER BY id IN ({', '.join('?' * len(first))}) DESC, saved_at, id LIMIT 1",
+            (self.clock(), *sources, *first)).fetchone()
+        return _item(row) if row else None
+
+    def next_reading(self, sources):
+        """L'istante del prossimo tentativo di lettura in programma, o None."""
+        sources = tuple(sources)
+        if not sources:
+            return None
+        return self.db.execute(
+            f"SELECT MIN(next_read_at) FROM items WHERE extraction = 'pending'"
+            f" AND source IN ({', '.join('?' * len(sources))})", sources).fetchone()[0]
+
+    def read_done(self, item_id, extraction, content=None, title=None, kind=None, topics=(), summary=None):
+        """Annota ciò che la lettura ha trovato: il testo e la descrizione che ne nasce. Con
+        "unavailable" o "failed" (una fonte che non si legge) nulla di ciò che c'era si perde."""
+        if extraction not in EXTRACTIONS or extraction == "pending":
+            raise ValueError(f"esito di lettura non ammesso: {extraction}")
+        with transaction(self.db):
+            self.db.execute(
+                "UPDATE items SET extraction = :extraction, content = COALESCE(:content, content),"
+                " title = COALESCE(:title, title), kind = COALESCE(:kind, kind),"
+                " topics = COALESCE(:topics, topics), summary = COALESCE(:summary, summary),"
+                " read_error = NULL, updated_at = :now WHERE id = :id",
+                {"extraction": extraction, "content": content, "title": title, "kind": kind,
+                 "topics": json.dumps(list(topics), ensure_ascii=False) if topics else None,
+                 "summary": summary, "now": self.clock(), "id": item_id})
+
+    def read_failed(self, item_id, error, delays, min_delay=0, final=None):
+        """Una lettura non è riuscita. Con final ("unavailable" o "failed") è l'esito definitivo;
+        altrimenti si riprova dopo l'attesa successiva, e finite le attese l'esito è "failed".
+        Restituisce lo stato di lettura risultante."""
+        with transaction(self.db):
+            row = self.db.execute("SELECT read_attempts FROM items WHERE id = ?", (item_id,)).fetchone()
+            if row is None:
+                return None
+            attempts, now = row[0] + 1, self.clock()
+            if final is None and attempts > len(delays):
+                final = "failed"
+            next_at = now if final else now + max(delays[attempts - 1], min_delay or 0)
+            self.db.execute(
+                "UPDATE items SET read_attempts = ?, next_read_at = ?, read_error = ?,"
+                " extraction = COALESCE(?, extraction), updated_at = ? WHERE id = ?",
+                (attempts, next_at, str(error)[:500], final, now, item_id))
+        return final or "pending"
+
+    def read_later(self, item_id, seconds, error):
+        """Rimanda una lettura senza contare un tentativo: il problema non è della fonte (per
+        esempio la chiave di Claude rifiutata)."""
+        with transaction(self.db):
+            self.db.execute("UPDATE items SET next_read_at = ?, read_error = ?, updated_at = ? WHERE id = ?",
+                            (self.clock() + seconds, str(error)[:500], self.clock(), item_id))
 
     def get(self, item_id):
         row = self.db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
@@ -436,5 +549,16 @@ def _item(row):
         note=row["note"], content=row["content"], extraction=row["extraction"], place=row["place"],
         latitude=row["latitude"], longitude=row["longitude"], taken_at=row["taken_at"],
         media=json.loads(row["media"]) if row["media"] else {}, sent_at=row["sent_at"],
-        saved_at=row["saved_at"],
+        saved_at=row["saved_at"], read_error=row["read_error"],
     )
+
+
+def _statements(script):
+    """Le istruzioni di uno script SQL, una per una: executescript chiuderebbe la transazione.
+    I trigger contengono punti e virgola: un'istruzione finisce solo dove sqlite3 la dà completa."""
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            yield statement.strip()
+            statement = ""
