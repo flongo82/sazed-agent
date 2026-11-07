@@ -29,6 +29,12 @@ api_base = "https://api.telegram.org"
 api_base = "https://api.anthropic.com"
 model = "claude-haiku-5-5"
 
+# Voice messages, audio and videos are transcribed on this computer, by whisper.cpp on the
+# processor, at low priority. scripts/setup-whisper.sh downloads the model into models/.
+[whisper]
+model = "models/ggml-large-v3-turbo-q5_0.bin"
+threads = 8
+
 # Reactions set on your messages, instead of replies; only some emoji are accepted, see
 # https://core.telegram.org/bots/api#reactiontypeemoji
 [reactions]

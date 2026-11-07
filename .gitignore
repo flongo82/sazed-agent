@@ -15,3 +15,6 @@ config.toml
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Il modello di Whisper, scaricato da scripts/setup-whisper.sh
+models/

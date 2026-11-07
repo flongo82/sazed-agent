@@ -15,7 +15,7 @@ from sazed_agent.config import Reactions
 from sazed_agent.coppermind import Coppermind, Draft
 from sazed_agent.journal import Journal
 from sazed_agent.lanes import Processor, lane_for
-from sazed_agent.reader import Reader
+from sazed_agent.reader import Extract, Reader
 from sazed_agent.telegram import Telegram, TelegramError
 from tests import fake_claude
 from tests.fake_claude import interpretation, tool
@@ -37,6 +37,18 @@ def update(update_id, text=None, lang="it", edited=False, **fields):
     return {"update_id": update_id, "edited_message" if edited else "message": msg}
 
 
+class FakeListener:
+    """Un finto ascolto: annota i file che riceve (contenuto, se video, percorso) e ne dà una
+    trascrizione fissa, con i fotogrammi indicati."""
+
+    def __init__(self, text="comprare il riso", frames=()):
+        self.text, self.frames, self.heard = text, frames, []
+
+    async def listen(self, path, video=False):
+        self.heard.append((Path(path).read_bytes(), video, Path(path)))
+        return Extract(None, None, self.text, True, self.frames)
+
+
 def text_has(fragment):
     return lambda method, params: method == "sendMessage" and fragment in params.get("text", "")
 
@@ -53,14 +65,15 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.web = FakeWeb()
         self.stop = asyncio.Event()
 
-    def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0):
+    def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0, listener=None):
         reader = None
         if reads:
             reader = Reader(transport=self.web.transport, allow=allow_all)
             self.addAsyncCleanup(reader.close)
         return Processor(self.journal, Telegram(self.telegram.api_base, token, timeout=5), "Custode", "auto",
                          Reactions("👍", "😢", "🤷"), delays, typing_interval=0.05, idle_wait=5.0,
-                         config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait)
+                         config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait,
+                         listener=listener)
 
     def with_claude(self, key=fake_claude.KEY, **options):
         """Un finto Claude, e il processore che lo usa."""
@@ -205,6 +218,59 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((item.kind, item.title, item.content), ("recipe", "Torta di mele definitiva", None))
         self.assertEqual(len(fake_claude.images(self.claude.of("describe")[0])), 1)
         self.assertEqual(self.reactions(), ["👍"])
+
+    async def test_a_voice_message_is_heard_and_described(self):
+        self.telegram.file("v", b"OggS voce")
+        listener = FakeListener("Comprare il riso e il parmigiano.")
+        p = self.with_claude(listener=listener)
+        self.claude.on("describe", lambda m: fake_claude.description("note", "Spesa", ["riso", "parmigiano"]))
+        await self.handle(update(1, voice={"file_id": "v", "file_unique_id": "V", "duration": 3}), processor=p)
+        await self.until(lambda: self.items()[0].extraction == "complete")
+        item = self.items()[0]
+        self.assertEqual((item.kind, item.title, item.content), ("note", "Spesa", "Comprare il riso e il parmigiano."))
+        [(data, video, path)] = listener.heard
+        self.assertEqual((data, video, path.exists()), (b"OggS voce", False, False))  # la cartella non c'è più
+        [message] = self.claude.messages("describe")
+        self.assertEqual((message["source"], message["content"]), ("voice", "Comprare il riso e il parmigiano."))
+        self.assertEqual(self.reactions(), ["👍"])
+
+    async def test_a_video_is_heard_and_seen(self):
+        self.telegram.file("m", b"mp4")
+        listener = FakeListener("tre uova e farina", frames=(("image/jpeg", b"\xff\xd8a"), ("image/jpeg", b"\xff\xd8b")))
+        p = self.with_claude(listener=listener)
+        await self.handle(update(1, video={"file_id": "m", "file_unique_id": "M", "duration": 30}), processor=p)
+        await self.until(lambda: self.items()[0].extraction == "complete")
+        self.assertTrue(listener.heard[0][1])
+        self.assertEqual(len(fake_claude.images(self.claude.of("describe")[0])), 2)
+
+    async def test_a_photo_is_looked_at_by_claude(self):
+        self.telegram.file("p", b"\xff\xd8foto")
+        p = self.with_claude()
+        self.claude.on("describe", lambda m: fake_claude.description("photo", "Tramonto sul mare", ["mare"]))
+        await self.handle(update(1, photo=[{"file_id": "piccola", "file_unique_id": "p1"},
+                                           {"file_id": "p", "file_unique_id": "P"}]), processor=p)
+        await self.until(lambda: self.items()[0].extraction == "complete")
+        self.assertEqual(self.items()[0].title, "Tramonto sul mare")
+        self.assertEqual(self.telegram.downloads, ["p"])  # la più grande
+        [image] = fake_claude.images(self.claude.of("describe")[0])
+        self.assertEqual(image["source"]["data"], "/9hmb3Rv")
+
+    async def test_a_file_too_big_or_gone_gets_a_shrug(self):
+        p = self.with_claude(listener=FakeListener())
+        await self.handle(update(1, video={"file_id": "grande", "file_unique_id": "G", "file_size": 25_000_000}),
+                          update(2, voice={"file_id": "sparito", "file_unique_id": "S"}), processor=p)
+        await self.until(lambda: self.reactions(10) == ["👍", "🤷"] and self.reactions(20) == ["👍", "🤷"])
+        big, gone = self.items()
+        self.assertEqual((big.extraction, gone.extraction), ("failed", "failed"))
+        self.assertIn("20 MB", big.read_error)
+        self.assertEqual(self.telegram.downloads, [])
+        self.assertEqual([prm["file_id"] for m, prm, _ in self.telegram.calls if m == "getFile"], ["sparito"])
+
+    async def test_without_whisper_recordings_wait_and_photos_need_claude(self):
+        p = await self.start(self.processor(reads=True))
+        self.assertEqual(p.readable, ("link",))
+        self.assertEqual(self.with_claude(reads=True, listener=FakeListener()).readable,
+                         ("link", "photo", "voice", "audio", "video", "video_note"))
 
     async def test_an_unreadable_link_gets_a_shrug(self):
         self.web.route("https://example.com/via", 410)

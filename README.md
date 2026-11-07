@@ -45,14 +45,18 @@ read-only tools (search with exact filters and words, and one item with the text
 source). A question about a link waits until that link has been read, for a few minutes at
 most.
 
-Links are read in a lane of their own, one at a time, so that nothing else waits for them:
-pages give their title, description, structured data (recipes with ingredients and steps) and
-main text; Instagram and TikTok give their whole caption, and YouTube its title and channel,
-through their public previews, together with the cover image: Claude looks at it, which is
-how a reel without a caption still gets a title. From what was read, Claude describes each item with a kind
-(recipe, article, video, note…), a title, topics and a short summary, which coppermind
-indexes; what was read is data for it, never instructions. A source that cannot be read gets
-🤷 on its message. Next: subtitles and audio of videos, voice messages, photos and documents.
+Links and files are read in a lane of their own, one at a time, so that nothing else waits
+for them. Pages give their title, description, structured data (recipes with ingredients and
+steps) and main text; Instagram and TikTok give their whole caption, and YouTube its title and
+channel, through their public previews, together with the cover image: Claude looks at it,
+which is how a reel without a caption still gets a title. Files sent in the chat (up to the
+Bot API's 20 MB) are downloaded into a temporary folder that disappears right after: Claude
+looks at photos; voice messages, audio and videos are transcribed on your computer by
+whisper.cpp, on the processor and at low priority, and a video also gives four frames for
+Claude to look at. From what was read, Claude describes each item with a kind (recipe,
+article, video, note…), a title, topics and a short summary, which coppermind indexes; what
+was read is data for it, never instructions. A source that cannot be read gets 🤷 on its
+message. Next: subtitles and audio of YouTube videos, documents.
 The architecture, the reasons behind it and the protocol between the two parts are described
 in the README of `sazed-bot`.
 
@@ -68,6 +72,8 @@ scripts/setup-mtproto.sh  # asks for the api_id and api_hash of an application c
                           # my.telegram.org, to download files beyond the Bot API's 20 MB
 scripts/setup-claude.sh   # asks for a Claude API key from the Claude Console, checks it with
                           # the API and saves it; the model is chosen in config.toml
+scripts/setup-whisper.sh  # downloads the whisper.cpp model into models/ (about 574 MB) and
+                          # checks it against its known SHA-256
 scripts/build.sh          # builds the sazed-agent image (podman rmi sazed-agent removes it)
 scripts/test.sh           # runs the tests in the container, without network access
 scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev, with Node and
@@ -88,7 +94,8 @@ Console, which bills separately from a claude.ai subscription; some plans includ
 credits for it. Create a key used only by this agent, so that you can revoke it on its own.
 
 `python3 -m sazed_agent check` verifies configuration, secrets, journal and coppermind without
-connecting to anything, and says whether Claude is ready.
+connecting to anything, and says whether Claude and the Whisper model are ready. Without the
+model, voice messages and videos are kept and wait to be heard.
 
 Run one agent per bot. If another agent connects to the same Worker, the Worker closes this
 one's connection (code 4000) and this one stops with exit code 2 instead of fighting back: two
@@ -103,9 +110,9 @@ computer, stop it here first.
 | Reliability | Every message goes through persistent states (received, read, saved, answered, done, or failed), and every link through its own reading state, with limited retries; one broken item never blocks the others |
 | Agent | The code saves, the model interprets: Claude says what your words are for and describes what was read, as structured data that the code checks and writes; to answer questions it has read-only tools on coppermind, and the recent conversation |
 | Links | Short links followed to their true address; pages read for title, description, structured data and main text; public previews for Instagram, TikTok and YouTube, cover included; never an address inside your home network |
-| Videos and voice messages | yt-dlp for the audio, faster-whisper on the GPU for the transcript |
+| Videos and voice messages | ffmpeg for the audio and a few frames, whisper.cpp on the processor for the transcript; yt-dlp for the subtitles and audio of YouTube |
 | Pages and documents | Main-text extraction; MarkItDown and Docling for PDFs and documents |
-| Photos | OCR; place and date of the shot from EXIF, with reverse geocoding on OpenStreetMap |
+| Photos | Claude looks at them and reads the words in them; place and date of the shot from EXIF, with reverse geocoding on OpenStreetMap |
 | Large files | Download through MTProto, up to 2 GB |
 | coppermind | A single SQLite file, shared with the journal so that saving an item and moving its message forward are one transaction: exact filters, full-text search (FTS5), and semantic search with embeddings computed on the GPU |
 

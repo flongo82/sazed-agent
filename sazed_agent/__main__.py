@@ -2,7 +2,8 @@
 
 - check: verifica configurazione, segreti, registro e coppermind senza collegarsi a nulla;
 - run: si collega al Worker, registra e conferma i messaggi, e li elabora nelle corsie:
-  note, link e file finiscono in coppermind, i link si leggono, le domande hanno risposta.
+  note, link e file finiscono in coppermind, link e file si leggono (vocali e video si
+  ascoltano, se c'è il modello di Whisper), le domande hanno risposta.
 """
 
 import argparse
@@ -20,6 +21,7 @@ from .coppermind import Coppermind, CoppermindError
 from .journal import Journal
 from .lanes import Processor, lane_for
 from .link import Replaced, WorkerLink, agent_url
+from .listener import Listener
 from .reader import Reader
 from .telegram import Telegram
 
@@ -66,6 +68,7 @@ def check(config_path):
         print(f"Claude: modello {config.claude.model}, chiave presente e protetta.")
     except ConfigError as err:
         print(f"Claude: non ancora pronto ({err}).")
+    print(f"Whisper: {listening(config)}.")
 
 
 def run(config_path):
@@ -76,7 +79,8 @@ def run(config_path):
         try:
             processor = Processor(journal, Telegram(config.telegram_api_base, bot_token), config.bot_name,
                                   config.language, config.reactions, config.retry_delays,
-                                  memory=Coppermind(journal.db), claude=claude_for(config), reader=Reader())
+                                  memory=Coppermind(journal.db), claude=claude_for(config), reader=Reader(),
+                                  listener=listener_for(config))
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
                               config.pong_timeout, on_recorded=processor.notify)
             asyncio.run(serve(link, processor))
@@ -92,6 +96,22 @@ def claude_for(config):
     except ConfigError as err:
         log.warning("Claude non configurato, ogni testo diventa una nota: %s", err)
         return None
+
+
+def listening(config):
+    if config.whisper is None:
+        return "non configurato, vocali e video non si ascoltano ([whisper] in config.toml)"
+    if not config.whisper.model.is_file():
+        return f"manca il modello {config.whisper.model}: lancia scripts/setup-whisper.sh"
+    return f"modello {config.whisper.model.name}, {config.whisper.threads} processori"
+
+
+def listener_for(config):
+    """Chi ascolta vocali e video, se il modello c'è; senza, quei file restano da leggere."""
+    if config.whisper is None or not config.whisper.model.is_file():
+        log.warning("Whisper: %s", listening(config))
+        return None
+    return Listener(config.whisper.model, config.whisper.threads)
 
 
 async def serve(link, processor, stop=None):

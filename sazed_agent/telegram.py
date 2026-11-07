@@ -7,13 +7,18 @@ Ogni errore diventa un TelegramError che dice se ha senso riprovare:
 - di configurazione (config_error): 401 e 404, cioè token rifiutato. Non è colpa del singolo
   messaggio: l'elemento si rimanda senza consumare i suoi tentativi.
 
-Il token sta nell'indirizzo delle richieste: non compare mai nei messaggi di errore né nei log.
+Il token sta nell'indirizzo delle richieste, anche di quelle che scaricano i file: non compare
+mai nei messaggi di errore né nei log.
 """
 
 import asyncio
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
+
+FILE_MAX = 20_000_000  # l'API dei bot non dà file più grandi: oltre servirà MTProto
+CHUNK = 1 << 16
 
 
 class TelegramError(Exception):
@@ -43,6 +48,33 @@ class Telegram:
 
     async def send_typing(self, chat_id):
         await self.call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+
+    async def get_file(self, file_id):
+        """Il percorso di un file sui server di Telegram, da scaricare con download."""
+        return (await self.call("getFile", {"file_id": file_id}))["file_path"]
+
+    async def download(self, file_path, destination, limit=FILE_MAX):
+        """Scarica un file di Telegram in destination, al massimo limit byte."""
+        await asyncio.to_thread(self._download, file_path, destination, limit)
+
+    def _download(self, file_path, destination, limit):
+        url = f"{self.api_base}/file/bot{self.token}/{urllib.parse.quote(file_path)}"
+        try:
+            with urllib.request.urlopen(url, timeout=self.timeout) as response, open(destination, "wb") as out:
+                size = 0
+                while chunk := response.read(CHUNK):
+                    size += len(chunk)
+                    if size > limit:
+                        raise TelegramError(f"download: file oltre {limit} byte", permanent=True)
+                    out.write(chunk)
+        except urllib.error.HTTPError as err:
+            if err.code == 401:
+                raise TelegramError(f"download: token del bot rifiutato da Telegram (HTTP {err.code})",
+                                    config_error=True) from None
+            raise TelegramError(f"download: HTTP {err.code}", permanent=err.code in (400, 403)) from None
+        except (urllib.error.URLError, OSError) as err:
+            reason = getattr(err, "reason", None) or type(err).__name__
+            raise TelegramError(f"download: Telegram non raggiungibile ({reason})") from None
 
     async def call(self, method, params):
         return await asyncio.to_thread(self._call, method, params)

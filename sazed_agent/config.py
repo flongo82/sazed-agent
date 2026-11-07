@@ -34,6 +34,12 @@ class Claude:
 
 
 @dataclass(frozen=True)
+class Whisper:
+    model: Path    # il modello di whisper.cpp: scripts/setup-whisper.sh
+    threads: int   # quanti processori usa la trascrizione
+
+
+@dataclass(frozen=True)
 class Config:
     root: Path
     bot_name: str
@@ -47,6 +53,7 @@ class Config:
     mtproto_dir: Path | None      # la sessione MTProto del bot, l'unico segreto che si scrive
     anthropic_api_key_file: Path | None  # la chiave dell'API di Claude: scripts/setup-claude.sh
     claude_settings: Claude | None       # [claude]: scripts/setup-claude.sh
+    whisper: Whisper | None              # [whisper]: senza, vocali e video non si ascoltano
     telegram_api_base: str
     reactions: Reactions
     ping_interval: float
@@ -109,6 +116,10 @@ def load(path):
     secrets, storage, telegram = section("secrets"), section("storage"), section("telegram")
     reactions, connection, retries = section("reactions"), section("connection"), section("retries")
     claude = section("claude") if "claude" in raw else None
+    whisper = section("whisper") if "whisper" in raw else None
+    threads = None if whisper is None else whisper.get("threads")
+    if whisper is not None and (not isinstance(threads, int) or isinstance(threads, bool) or threads < 1):
+        raise ConfigError("whisper.threads deve essere un numero intero positivo")
 
     language = _text(raw, "language").lower()
     if language != "auto" and language not in MESSAGES:
@@ -135,6 +146,7 @@ def load(path):
         anthropic_api_key_file=_optional_path(root, secrets, "anthropic_api_key"),
         claude_settings=None if claude is None else Claude(
             api_base=_text(claude, "api_base", "claude.").rstrip("/"), model=_text(claude, "model", "claude.")),
+        whisper=None if whisper is None else Whisper(root / _text(whisper, "model", "whisper."), threads),
         telegram_api_base=_text(telegram, "api_base", "telegram.").rstrip("/"),
         reactions=Reactions(
             received=_text(reactions, "received", "reactions."),

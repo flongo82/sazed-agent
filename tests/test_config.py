@@ -121,6 +121,15 @@ class Config(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, r"\[claude\] manca in config.toml.*setup-claude.sh"):
             config.claude
 
+    def test_whisper_settings_and_a_config_from_before_them(self):
+        config = load(self.path)
+        self.assertEqual((config.whisper.model, config.whisper.threads),
+                         (self.dir / "models" / "ggml-large-v3-turbo-q5_0.bin", 8))
+        text = self.path.read_text(encoding="utf-8")
+        self.path.write_text(text[:text.index("# Voice messages, audio")] + text[text.index("# Reactions"):],
+                             encoding="utf-8")
+        self.assertIsNone(load(self.path).whisper)  # vocali e video restano da leggere
+
     def test_invalid_values(self):
         cases = [
             ('language = "auto"', 'language = "fr"', "language"),
@@ -130,6 +139,9 @@ class Config(unittest.TestCase):
             ('unreadable = "🤷"', 'unreadable = 1', "reactions.unreadable"),
             ("pong_timeout = 10", "pong_timeout = 30", "minore di connection.ping_interval"),
             ('model = "claude-haiku-5-5"', 'model = ""', "claude.model"),
+            ("threads = 8", "threads = 0", "whisper.threads"),
+            ("threads = 8", "threads = true", "whisper.threads"),
+            ('model = "models/ggml-large-v3-turbo-q5_0.bin"', "model = 3", "whisper.model"),
         ]
         for old, new, message in cases:
             with self.subTest(new):

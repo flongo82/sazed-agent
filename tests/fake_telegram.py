@@ -4,6 +4,8 @@ Annota ogni chiamata con il suo esito e risponde come Telegram. Si può farlo fa
 - fail(method, status, ...): i prossimi tentativi di quel metodo falliscono con quegli stati;
 - rule(funzione): per ogni chiamata, la funzione può restituire uno stato di errore;
 - slow(funzione, secondi): le chiamate per cui la funzione è vera rispondono in ritardo.
+file(file_id, dati) mette un file sui finti server: getFile ne dà il percorso e GET
+/file/bot<token>/<percorso> lo scarica; downloads elenca i percorsi scaricati.
 
 url_entities(testo) dà le entità che Telegram aggiunge ai link di un messaggio.
 """
@@ -31,6 +33,7 @@ class FakeTelegram:
         self._lock = threading.Lock()
         self._plans, self._rules, self._slow = {}, [], []
         self._next_message_id = 9000
+        self.files, self.downloads = {}, []
 
     def start(self, port=0):
         fake = self
@@ -38,6 +41,9 @@ class FakeTelegram:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 fake._handle(self)
+
+            def do_GET(self):
+                fake._download(self)
 
             def log_message(self, *args):
                 pass
@@ -57,6 +63,9 @@ class FakeTelegram:
 
     def rule(self, decide):
         self._rules.append(decide)
+
+    def file(self, file_id, data):
+        self.files[file_id] = data
 
     def slow(self, match, seconds):
         self._slow.append((match, seconds))
@@ -84,12 +93,29 @@ class FakeTelegram:
             if status == 429:
                 body["parameters"] = {"retry_after": 1}
             return self._reply(request, method, params, status, body)
+        if method == "getFile" and params.get("file_id") not in self.files:
+            return self._reply(request, method, params, 400, {"ok": False, "error_code": 400,
+                                                              "description": "Bad Request: invalid file_id"})
         with self._lock:
             result = True
             if method == "sendMessage":
                 result = {"message_id": self._next_message_id}
                 self._next_message_id += 1
+            if method == "getFile":
+                result = {"file_id": params["file_id"], "file_path": f"files/{params['file_id']}"}
         self._reply(request, method, params, 200, {"ok": True, "result": result})
+
+    def _download(self, request):
+        prefix = f"/file/bot{self.token}/files/"
+        data = self.files.get(request.path[len(prefix):]) if request.path.startswith(prefix) else None
+        status = 200 if data is not None else 401 if not request.path.startswith(f"/file/bot{self.token}/") else 404
+        with self._lock:
+            if status == 200:
+                self.downloads.append(request.path[len(prefix):])
+        request.send_response(status)
+        request.send_header("content-length", str(len(data or b"")))
+        request.end_headers()
+        request.wfile.write(data or b"")
 
     def _reply(self, request, method, params, status, body):
         with self._lock:

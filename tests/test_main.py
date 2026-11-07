@@ -42,6 +42,11 @@ class Check(unittest.TestCase):
         self.assertIn("coppermind: 0 elementi.", out)
         self.assertIn("Claude: non ancora pronto (", out)  # senza chiave l'agente lavora lo stesso
         self.assertIn("setup-claude.sh", out)
+        self.assertIn("Whisper: manca il modello", out)  # e i vocali aspettano
+        self.assertIn("setup-whisper.sh", out)
+        (self.dir / "models").mkdir()
+        (self.dir / "models" / "ggml-large-v3-turbo-q5_0.bin").write_bytes(b"modello")
+        self.assertIn("Whisper: modello ggml-large-v3-turbo-q5_0.bin, 8 processori.", self.run_check()[1])
         self.assertTrue((self.dir / "data" / "coppermind.db").exists())
         self.assertNotIn("SEGRETO", out)
 

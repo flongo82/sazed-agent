@@ -10,8 +10,11 @@ le domande che non aspettano dietro una lettura lunga.
   parla, al massimo read_wait secondi dal suo arrivo, poi Claude risponde cercando in
   coppermind. Da qui passano anche le risposte fisse (comando sconosciuto, messaggio che non si
   sa custodire);
-- lettura: un link alla volta, prima quelli che una domanda aspetta; dal contenuto Claude
-  ricava tipo, titolo, argomenti e riassunto. Una fonte che non si legge mette 🤷 sul messaggio.
+- lettura: un elemento alla volta, prima quelli che una domanda aspetta. I link si leggono
+  alla fonte; i file si scaricano da Telegram in una cartella temporanea: le foto Claude le
+  guarda, vocali, audio e video si ascoltano (e dei video si prendono anche dei fotogrammi).
+  Dal contenuto Claude ricava tipo, titolo, argomenti e riassunto. Una fonte che non si legge
+  mette 🤷 sul messaggio.
 
 Ogni passo è scritto nel registro (o in coppermind, per la lettura) prima del successivo, così
 un arresto in qualunque punto riprende dallo stato registrato; salvataggio e cambio di stato
@@ -24,14 +27,16 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+import tempfile
 import time
+from pathlib import Path
 
 from . import intake
 from .claude import ClaudeError, Interpretation, view
 from .coppermind import Coppermind, Draft, unique
 from .messages import STATUS_COMMANDS, language_for, messages_for
-from .reader import ReadError
-from .telegram import TelegramError
+from .reader import Extract, ReadError
+from .telegram import FILE_MAX, TelegramError
 
 log = logging.getLogger("sazed_agent.lanes")
 
@@ -39,7 +44,9 @@ ACTIVE = ("received", "read", "saved", "answered")
 INTAKE, ANSWERS = ("received", "read"), ("saved", "answered")
 THREAD_WINDOW, THREAD_LIMIT = 3 * 3600, 10   # il filo: i messaggi delle ultime ore, fino a dieci
 READ_WAIT = 600     # quanto una domanda aspetta la lettura degli elementi di cui parla
-READABLE = ("link",)  # ciò che il lettore sa leggere, per ora
+# Ciò che si sa leggere, e con che cosa: i link con il lettore, le foto con Claude (che le
+# guarda), vocali, audio e video con chi ascolta (Whisper).
+LINKS, PICTURES, RECORDINGS = ("link",), ("photo",), ("voice", "audio", "video", "video_note")
 
 
 def lane_for(update):
@@ -58,12 +65,14 @@ def _message(update):
 class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
                  typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None,
-                 claude=None, reader=None, read_wait=READ_WAIT):
+                 claude=None, reader=None, read_wait=READ_WAIT, listener=None):
         self.journal, self.telegram = journal, telegram
         self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
         self.claude = claude  # senza, le parole accompagnano i link o sono una nota, e nulla si descrive
-        self.reader = reader  # senza, nulla si legge
-        self.readable = READABLE if reader is not None else ()
+        self.reader = reader  # senza, i link non si leggono
+        self.listener = listener  # senza, vocali, audio e video non si ascoltano
+        self.readable = ((LINKS if reader is not None else ()) + (PICTURES if claude is not None else ())
+                         + (RECORDINGS if listener is not None else ()))
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
         self.retry_delays, self.typing_interval, self.idle_wait = retry_delays, typing_interval, idle_wait
         self.config_pause = config_pause  # attesa dopo un token rifiutato, senza contare tentativi
@@ -334,12 +343,9 @@ class Processor:
 
     async def _read(self, item):
         try:
-            resolved = await self.reader.resolve(item.url)  # un link breve rimasto tale all'ingresso
-            if resolved != item.url and self.memory.relink(item.id, resolved):
-                log.info("elemento %s: link breve portato al suo indirizzo", item.id)
-            extract = await self.reader.read(resolved)
+            extract = await (self._read_link(item) if item.source == "link" else self._read_file(item))
         except Exception as err:  # anche un difetto nel codice: la corsia va avanti
-            if not isinstance(err, ReadError):
+            if not isinstance(err, (ReadError, TelegramError)):  # il download di un file da Telegram
                 log.exception("lettura dell'elemento %s: errore inatteso", item.id)
             final = "unavailable" if getattr(err, "unavailable", False) else "failed" if getattr(
                 err, "permanent", False) else None
@@ -371,6 +377,25 @@ class Processor:
         log.info("elemento %s letto (%s)%s", item.id, "completo" if extract.complete else "in parte",
                  "" if d else ", senza descrizione")
         self.wake["answers"].set()
+
+    async def _read_link(self, item):
+        resolved = await self.reader.resolve(item.url)  # un link breve rimasto tale all'ingresso
+        if resolved != item.url and self.memory.relink(item.id, resolved):
+            log.info("elemento %s: link breve portato al suo indirizzo", item.id)
+        return await self.reader.read(resolved)
+
+    async def _read_file(self, item):
+        """Scarica il file da Telegram in una cartella temporanea e lo legge: una foto la
+        guarda Claude, il resto si ascolta."""
+        media = item.media or {}
+        if (media.get("file_size") or 0) > FILE_MAX:
+            raise ReadError("file oltre i 20 MB dell'API dei bot", permanent=True)
+        with tempfile.TemporaryDirectory(prefix="sazed-") as work:
+            path = Path(work) / "file"
+            await self.telegram.download(await self.telegram.get_file(media["file_id"]), path)
+            if item.source in PICTURES:
+                return Extract(None, None, None, True, (("image/jpeg", path.read_bytes()),))
+            return await self.listener.listen(path, video=item.source in ("video", "video_note"))
 
     def _item_language(self, item):
         entry = self.journal.of_message(item.chat_id, item.message_id)

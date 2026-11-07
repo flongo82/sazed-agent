@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Starts sazed-agent in its container. Configuration and secrets are mounted read-only, the
-# data folder (journal and catalogue) read-write. Stop it with: podman stop sazed-agent
+# Starts sazed-agent in its container. Configuration, secrets and the Whisper model are
+# mounted read-only, the data folder (journal and catalogue) read-write.
+# Stop it with: podman stop sazed-agent
 # Usage: scripts/run.sh [extra arguments for the agent, default: run]
 set -euo pipefail
 
@@ -12,7 +13,7 @@ fi
 if ! podman image exists sazed-agent; then
   "$AGENT_DIR/scripts/build.sh"
 fi
-mkdir -p "$AGENT_DIR/data"
+mkdir -p "$AGENT_DIR/data" "$AGENT_DIR/models"
 
 args=("$@")
 [ ${#args[@]} -gt 0 ] || args=(run)
@@ -22,4 +23,5 @@ podman run --rm --name sazed-agent --replace --userns keep-id --tz local \
   --volume "$AGENT_DIR/config.toml:/app/config.toml:ro" \
   --volume "$AGENT_DIR/secrets:/app/secrets:ro" \
   --volume "$AGENT_DIR/data:/app/data" \
+  --volume "$AGENT_DIR/models:/app/models:ro" \
   sazed-agent "${args[@]}"

@@ -22,9 +22,11 @@ novembre 2026, dopo le prove dal telefono: ogni messaggio è una battuta di una 
 non un caso a sé. 👍 appena arriva e nessuna risposta per ciò che si custodisce; Claude dice a
 che cosa servono le parole nel filo degli ultimi messaggi (nota, commento a un elemento anche
 del messaggio prima, domanda); le domande hanno risposta con due strumenti di sola lettura,
-dopo la lettura dei link di cui parlano. Passo 4.3 in parte: corsia di lettura dei link (link
-brevi, pagine con dati strutturati, anteprime pubbliche di Instagram, TikTok e YouTube con
-la copertina) e descrizione dal contenuto e dalla copertina. Prossima parte: sottotitoli e audio dei video, vocali.
+dopo la lettura degli elementi di cui parlano. Passo 4.3 in parte: corsia di lettura dei link
+(link brevi, pagine con dati strutturati, anteprime pubbliche di Instagram, TikTok e YouTube
+con la copertina), dei file di Telegram fino a 20 MB (foto guardate da Claude; vocali, audio e
+video trascritti da whisper.cpp sul processore, con quattro fotogrammi per i video) e
+descrizione dal contenuto. Prossima parte: sottotitoli e audio di YouTube con yt-dlp.
 
 ## Struttura
 
@@ -39,6 +41,9 @@ la copertina) e descrizione dal contenuto e dalla copertina. Prossima parte: sot
 - `sazed_agent/reader.py`: la lettura dei link (httpx): link brevi, pagine (titolo, meta,
   JSON-LD, testo principale), anteprime oEmbed con la copertina (per Claude, mai su disco);
   solo host pubblici, al massimo 5 MB
+- `sazed_agent/listener.py`: l'ascolto dei file: ffprobe, audio a 16 kHz e fotogrammi con
+  ffmpeg, trascrizione con whisper.cpp (priorità bassa, al più mezz'ora), in una cartella
+  temporanea che sparisce subito dopo
 - `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale): interpret (a che cosa servono le
   parole, nel filo), describe (dal contenuto letto), answer (strumenti di sola lettura su
   coppermind); risposte strutturate controllate prima dell'uso; errori come quelli di Telegram
@@ -46,17 +51,21 @@ la copertina) e descrizione dal contenuto e dalla copertina. Prossima parte: sot
 - `sazed_agent/lanes.py`: le corsie (comandi, ingresso, risposte, lettura), stati, tentativi,
   reazioni, il filo della conversazione
 - `sazed_agent/link.py`: connessione WebSocket con il Worker, ack, riconnessioni
-- `sazed_agent/telegram.py`: chiamate all'API dei bot ed errori (definitivi, da riprovare, di
-  configurazione); il token non compare mai nei messaggi di errore
+- `sazed_agent/telegram.py`: chiamate all'API dei bot, download dei file fino a 20 MB, ed errori
+  (definitivi, da riprovare, di configurazione); il token non compare mai nei messaggi di errore
 - `sazed_agent/__main__.py`: `python3 -m sazed_agent check` e `run` (istanza unica per `data/`)
 - `tests/`: test con `unittest`, senza rete; `fake_worker.py` e `fake_telegram.py` sono un
   finto sazed-bot e un finto Telegram, `fake_claude.py` una finta API di Claude, `test_flow.py`
-  prova il giro completo, `fake_web.py` un finto web per il lettore (httpx.MockTransport).
+  prova il giro completo, `fake_web.py` un finto web per il lettore (httpx.MockTransport),
+  `fake_whisper.py` un finto `whisper-cli` (i test di `listener.py` usano il vero ffmpeg).
   `contract.py`
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
-- `Containerfile`, `scripts/`: immagine Podman, build, test, setup
+- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg e whisper.cpp da apt), build, test,
+  setup
+- `models/`: il modello di whisper.cpp (escluso da git, montato in sola lettura), scaricato e
+  verificato con la sua impronta da `scripts/setup-whisper.sh`
 - `pip-requirements.txt`: ciò che apt non ha, con versione e hash (oggi solo `jiter`, che
   `python3-anthropic` di Ubuntu importa senza dichiararlo)
 
@@ -66,6 +75,7 @@ la copertina) e descrizione dal contenuto e dalla copertina. Prossima parte: sot
 scripts/setup.sh                   # segreti e config.toml (chiede il token del bot)
 scripts/setup-mtproto.sh           # api_id e api_hash da my.telegram.org, secrets/mtproto/
 scripts/setup-claude.sh            # chiave API di Claude (provata con l'API), sezione [claude]
+scripts/setup-whisper.sh           # modello di whisper.cpp in models/ (574 MB), sezione [whisper]
 scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
 scripts/test.sh                    # tutti i test nel container, senza rete
 scripts/test.sh tests.test_journal # un solo modulo di test
