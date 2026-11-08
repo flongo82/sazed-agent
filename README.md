@@ -9,9 +9,12 @@ videos and voice messages, extracts the text of pages and documents, looks insid
 understands whether it is something to keep, a question, or both, and answers in the same
 chat.
 
-What deserves to be remembered goes into **coppermind**, the catalogue: like the copper minds
-of the Terris Keepers in Brandon Sanderson's *Mistborn*, it holds what is entrusted to it so
-that it can be found again.
+What deserves to be remembered goes into **coppermind**, the catalogue, so that it can be found
+again.
+
+In Brandon Sanderson's *Mistborn*, Sazed is a Terrisman Keeper who stores knowledge in
+copperminds and draws it out again whenever someone needs it: hence the names. This repository
+is the Keeper's mind; coppermind, what it keeps.
 
 ## What it does
 
