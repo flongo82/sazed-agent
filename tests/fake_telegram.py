@@ -2,7 +2,8 @@
 
 Annota ogni chiamata con il suo esito e risponde come Telegram. Si può farlo fallire:
 - fail(method, status, ...): i prossimi tentativi di quel metodo falliscono con quegli stati;
-- rule(funzione): per ogni chiamata, la funzione può restituire uno stato di errore;
+- rule(funzione): per ogni chiamata, la funzione può restituire uno stato di errore, o
+  (stato, descrizione);
 - slow(funzione, secondi): le chiamate per cui la funzione è vera rispondono in ritardo.
 file(file_id, dati) mette un file sui finti server: getFile ne dà il percorso e GET
 /file/bot<token>/<percorso> lo scarica; downloads elenca i percorsi scaricati.
@@ -88,8 +89,9 @@ class FakeTelegram:
             status = plan.pop(0) if plan else None
         if status is None:
             status = next((s for s in (rule(method, params) for rule in self._rules) if s), None)
+        status, description = status if isinstance(status, tuple) else (status, f"errore finto {status}")
         if status:
-            body = {"ok": False, "error_code": status, "description": f"errore finto {status}"}
+            body = {"ok": False, "error_code": status, "description": description}
             if status == 429:
                 body["parameters"] = {"retry_after": 1}
             return self._reply(request, method, params, status, body)

@@ -30,8 +30,9 @@ YouTube con yt-dlp (descrizione, sottotitoli nella lingua originale o, se mancan
 descrizione dal contenuto. Le parole dette in un vocale valgono come quelle scritte: una domanda
 fatta a voce ha la sua risposta. Documenti (PDF, EPUB, DOCX, ODT, testo) letti in parte come vuole
 R9, con le schede di Open Library, Crossref e Wikipedia per le opere pubblicate senza abstract, e
-letti tutti solo su richiesta. I file chiesti tornano in chat (R6). Prossima parte: file oltre i
-20 MB (MTProto).
+letti tutti solo su richiesta. I file chiesti tornano in chat (R6); i file oltre i 20 MB si
+scaricano via MTProto, quattro parti insieme (R7). Passo 4.3 completato; R8 (foto con EXIF)
+rimandato.
 
 ## Struttura
 
@@ -56,6 +57,8 @@ letti tutti solo su richiesta. I file chiesti tornano in chat (R6). Prossima par
 - `sazed_agent/videos.py`: i video di YouTube con yt-dlp (senza configurazione, cookie, cache
   né playlist): descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
   traduzioni), altrimenti l'audio per Whisper; gli errori non dicono quale video
+- `sazed_agent/mtproto.py`: i file oltre i 20 MB via MTProto (Telethon, token del bot, senza
+  aggiornamenti), a pezzi da 512 KB in quattro parti insieme; la sessione in `secrets/mtproto/`
 - `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale): interpret (a che cosa servono le
   parole, nel filo), describe (dal contenuto letto), answer (strumenti di sola lettura su
   coppermind); risposte strutturate controllate prima dell'uso; errori come quelli di Telegram

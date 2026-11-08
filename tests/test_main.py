@@ -50,6 +50,16 @@ class Check(unittest.TestCase):
         self.assertTrue((self.dir / "data" / "coppermind.db").exists())
         self.assertNotIn("SEGRETO", out)
 
+    def test_big_files_need_mtproto(self):
+        self.assertIn("File oltre i 20 MB: MTProto non ancora pronto (", self.run_check()[1])
+        for name, value in (("api_id", "1234"), ("api_hash", "SEGRETO-HASH")):
+            (self.dir / "secrets" / name).write_text(value)
+            os.chmod(self.dir / "secrets" / name, 0o600)
+        (self.dir / "secrets" / "mtproto").mkdir(mode=0o700)
+        out = self.run_check()[1]
+        self.assertIn("File oltre i 20 MB: MTProto pronto, la sessione si apre al primo file.", out)
+        self.assertNotIn("SEGRETO", out)
+
     def test_addresses_requested_by_the_libraries_stay_out_of_the_logs(self):
         self.run_check()  # httpx scrive ogni indirizzo che apre, cioè i link dell'utente
         self.assertGreaterEqual(logging.getLogger("httpx").getEffectiveLevel(), logging.WARNING)

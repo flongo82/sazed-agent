@@ -70,7 +70,8 @@ Ask to read a document in full, with it or later (replying to it, or naming it),
 text is read, summarised as a whole and searchable passage by passage; the answer comes once the
 reading is done. Ask for a file you kept ("send me the rent contract") and, after the answer, the
 bot copies its original message back into the chat, or resends the file if that message is gone.
-Next: files beyond 20 MB.
+Files beyond the Bot API's 20 MB (up to 2 GB) are downloaded through MTProto with the bot's own
+token, four pieces at a time (about 5 MB/s here), and then read like any other file.
 The architecture, the reasons behind it and the protocol between the two parts are described
 in the README of `sazed-bot`.
 

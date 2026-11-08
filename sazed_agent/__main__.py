@@ -25,6 +25,7 @@ from .lanes import Processor, lane_for
 from .link import Replaced, WorkerLink, agent_url
 from .listener import Listener
 from .lookup import Lookup
+from .mtproto import BigFiles
 from .reader import Reader
 from .telegram import Telegram
 from .videos import Videos
@@ -73,6 +74,18 @@ def check(config_path):
     except ConfigError as err:
         print(f"Claude: non ancora pronto ({err}).")
     print(f"Whisper: {listening(config)}.")
+    print(f"File oltre i 20 MB: {big_files_status(config)}.")
+
+
+def big_files_status(config):
+    try:
+        config.api_id, config.api_hash
+        session = config.mtproto_session_file
+    except ConfigError as err:
+        return f"MTProto non ancora pronto ({err})"
+    if session.exists():
+        return "MTProto pronto, sessione del bot salvata"
+    return "MTProto pronto, la sessione si apre al primo file"
 
 
 def run(config_path):
@@ -86,7 +99,7 @@ def run(config_path):
                                   config.language, config.reactions, config.retry_delays,
                                   memory=Coppermind(journal.db), claude=claude_for(config), reader=reader,
                                   listener=listener, videos=Videos(listener), documents=Documents(),
-                                  lookup=Lookup(reader))
+                                  lookup=Lookup(reader), big_files=big_files_for(config))
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
                               config.pong_timeout, on_recorded=processor.notify)
             asyncio.run(serve(link, processor))
@@ -110,6 +123,16 @@ def listening(config):
     if not config.whisper.model.is_file():
         return f"manca il modello {config.whisper.model}: lancia scripts/setup-whisper.sh"
     return f"modello {config.whisper.model.name}, {config.whisper.threads} processori"
+
+
+def big_files_for(config):
+    """MTProto per i file oltre i 20 MB, se api_id e api_hash ci sono; senza, quei file
+    ricevono 🤷."""
+    try:
+        return BigFiles(config.mtproto_session_file, config.api_id, config.api_hash, config.bot_token)
+    except ConfigError as err:
+        log.warning("MTProto non configurato, i file oltre i 20 MB non si scaricano: %s", err)
+        return None
 
 
 def listener_for(config):
@@ -139,6 +162,8 @@ async def serve(link, processor, stop=None):
         await lanes
         if getattr(processor, "reader", None) is not None:
             await processor.reader.close()
+        if getattr(processor, "big_files", None) is not None:
+            await processor.big_files.close()
         log.info("agente fermato")
 
 

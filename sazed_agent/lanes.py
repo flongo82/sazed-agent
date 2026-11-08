@@ -79,7 +79,7 @@ class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
                  typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None,
                  claude=None, reader=None, read_wait=READ_WAIT, listener=None, videos=None,
-                 listen_wait=LISTEN_WAIT, documents=None, lookup=None):
+                 listen_wait=LISTEN_WAIT, documents=None, lookup=None, big_files=None):
         self.journal, self.telegram = journal, telegram
         self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
         self.claude = claude  # senza, le parole accompagnano i link o sono una nota, e nulla si descrive
@@ -88,6 +88,7 @@ class Processor:
         self.videos = videos  # senza, dei video di YouTube resta l'anteprima
         self.documents = documents  # senza, i documenti non si leggono
         self.lookup = lookup  # senza, di un libro senza abstract resta ciò che dicono le prime pagine
+        self.big_files = big_files  # MTProto: senza, un file oltre i 20 MB non si scarica
         self.readable = ((LINKS if reader is not None else ()) + (PICTURES if claude is not None else ())
                          + (RECORDINGS if listener is not None else ()) + (PAPERS if documents is not None else ()))
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
@@ -519,12 +520,13 @@ class Processor:
         guarda Claude, un documento si sfoglia (o si legge tutto), il resto si ascolta. Un
         documento che è un'immagine, un audio o un video si tratta come tale."""
         media = item.media or {}
-        if (media.get("file_size") or 0) > FILE_MAX:
-            raise ReadError("file oltre i 20 MB dell'API dei bot", permanent=True)
+        big = (media.get("file_size") or 0) > FILE_MAX
+        if big and self.big_files is None:
+            raise ReadError("file oltre i 20 MB dell'API dei bot, e MTProto non è configurato", permanent=True)
         mime = media.get("mime_type") or ""
         with tempfile.TemporaryDirectory(prefix="sazed-") as work:
             path = Path(work) / "file"
-            await self.telegram.download(await self.telegram.get_file(media["file_id"]), path)
+            await self._download(item, media, path, big)
             if item.source in PICTURES or (item.source in PAPERS and mime in IMAGE_TYPES and self.claude
                                            and path.stat().st_size <= MAX_IMAGE):
                 return Extract(None, None, None, True, ((mime or "image/jpeg", path.read_bytes()),))
@@ -532,6 +534,19 @@ class Processor:
                 return await self.documents.read(path, media.get("file_name"), mime, full=item.read_full)
             return await self.listener.listen(path, video=item.source in ("video", "video_note")
                                               or mime.startswith("video/"))
+
+    async def _download(self, item, media, path, big):
+        """Il file da Telegram: con l'API dei bot fino a 20 MB, oltre via MTProto (R7). Anche un
+        file senza dimensione che l'API dei bot rifiuta perché troppo grande passa da MTProto."""
+        if not big:
+            try:
+                await self.telegram.download(await self.telegram.get_file(media["file_id"]), path)
+                return
+            except TelegramError as err:
+                if self.big_files is None or "too big" not in str(err):
+                    raise
+        log.info("elemento %s: file grande, scaricato via MTProto", item.id)
+        await self.big_files.download(item.chat_id, item.message_id, path)
 
     def _item_language(self, item):
         entry = self.journal.of_message(item.chat_id, item.message_id)

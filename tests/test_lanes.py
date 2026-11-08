@@ -76,6 +76,18 @@ class FakeLookup:
         return self.found
 
 
+class FakeBigFiles:
+    """Un finto MTProto: scarica i file grandi dati per message_id, e annota che cosa scarica."""
+
+    def __init__(self, files):
+        self.files, self.downloads = files, []
+
+    async def download(self, chat_id, message_id, destination):
+        self.downloads.append((chat_id, message_id))
+        Path(destination).write_bytes(self.files[message_id])
+        return len(self.files[message_id])
+
+
 def text_has(fragment):
     return lambda method, params: method == "sendMessage" and fragment in params.get("text", "")
 
@@ -93,7 +105,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.stop = asyncio.Event()
 
     def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0, listener=None,
-                  videos=None, listen_wait=5.0, documents=None, lookup=None):
+                  videos=None, listen_wait=5.0, documents=None, lookup=None, big_files=None):
         reader = None
         if reads:
             reader = Reader(transport=self.web.transport, allow=allow_all)
@@ -102,7 +114,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
                          Reactions("👍", "😢", "🤷"), delays, typing_interval=0.05, idle_wait=5.0,
                          config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait,
                          listener=listener, videos=videos, listen_wait=listen_wait, documents=documents,
-                         lookup=lookup)
+                         lookup=lookup, big_files=big_files)
 
     def with_claude(self, key=fake_claude.KEY, **options):
         """Un finto Claude, e il processore che lo usa."""
@@ -445,6 +457,22 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.items()[0].extraction != "pending")
         [request] = self.claude.of("describe")
         self.assertEqual(fake_claude.images(request)[0]["source"]["media_type"], "image/png")
+
+    async def test_a_file_beyond_20_mb_comes_through_mtproto(self):
+        big = FakeBigFiles({10: pdf(["Il pozzo dell'ascensione", "Brandon Sanderson"]),
+                            20: pdf(["Mistborn, l'ultimo impero"])})
+        self.telegram.file("s", b"")  # senza dimensione: l'API dei bot lo rifiuta perché troppo grande
+        self.telegram.rule(lambda m, prm: (400, "Bad Request: file is too big") if m == "getFile" else None)
+        p = self.with_claude(documents=Documents(), big_files=big)
+        await self.handle(update(1, document={"file_id": "b", "file_unique_id": "B", "file_name": "pozzo.pdf",
+                                              "mime_type": "application/pdf", "file_size": 30_000_000}),
+                          update(2, document={"file_id": "s", "file_unique_id": "S", "file_name": "mistborn.pdf",
+                                              "mime_type": "application/pdf"}), processor=p)
+        await self.until(lambda: all(i.extraction != "pending" for i in self.items()))
+        self.assertEqual(big.downloads, [(42, 10), (42, 20)])
+        self.assertEqual([i.extraction for i in self.items()], ["complete", "complete"])
+        self.assertIn("Brandon Sanderson", self.items()[0].content)
+        self.assertEqual(self.telegram.downloads, [])  # niente dall'API dei bot
 
     async def test_a_file_too_big_or_gone_gets_a_shrug(self):
         p = self.with_claude(listener=FakeListener())
