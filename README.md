@@ -35,8 +35,9 @@ spoken in a voice message count like typed ones, so a question asked aloud gets 
   main text;
 - Instagram, TikTok and YouTube: their public previews with the cover image, which Claude
   looks at; for YouTube, also the description and the subtitles in the original language
-  through yt-dlp, or the audio when there are none; for Instagram reels, with the cookies of a
-  secondary account, also the video, transcribed and looked at through a few frames;
+  through yt-dlp, or the audio when there are none; for an Instagram reel whose caption and
+  cover say too little, also its video, asked for without an account when Instagram gives it,
+  transcribed and read through its frames;
 - files sent in the chat: photos are looked at by Claude; voice messages, audio and videos are
   transcribed on your computer by whisper.cpp, and a video also gives a frame each time its
   picture changes (up to 30), so that Claude reads the words that appear on it: in a reel without
@@ -93,14 +94,15 @@ scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev,
 Each of Claude, Whisper, the embedding model and MTProto is optional: without Claude the
 words go with the items or become notes, and nothing is described or answered; without the
 Whisper model, voice messages and videos are kept and wait to be heard; without the embedding
-model, search goes by words only; without MTProto, files beyond 20 MB get 🤷; without the
-Instagram cookies, reels give only their caption and cover.
+model, search goes by words only; without MTProto, files beyond 20 MB get 🤷.
 
-Instagram does not give a reel's video without an account. Use a secondary account, never your
-own: Instagram may limit or suspend an account it sees used by a program. Log in with it in a
-browser, export the instagram.com cookies in Netscape format (an extension such as "Get
-cookies.txt LOCALLY" does it), run `scripts/setup-instagram.sh` on that file, then delete the
-file and do not log out of that session.
+Without an account, Instagram gives a reel's video only sometimes; when it does not, the
+caption and cover remain, and sazed may suggest downloading the reel from the app (Share →
+Download) and sending it as a video. The cookies of a secondary account are optional: Instagram
+may limit or suspend an account it sees used by a program, so never use your own. To use one,
+log in with it in a browser, export the instagram.com cookies in Netscape format (an extension
+such as "Get cookies.txt LOCALLY" does it), run `scripts/setup-instagram.sh` on that file, then
+delete the file and do not log out of that session.
 
 An API key is not tied to a model: the agent names the model on every request, from the
 `[claude]` section of `config.toml` (Claude Haiku by default, which is plenty for

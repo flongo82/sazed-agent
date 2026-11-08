@@ -55,12 +55,11 @@ class FakeListener:
 
 
 class FakeVideos:
-    """Una finta lettura dei video: aggiunge una trascrizione all'anteprima, o fallisce. Con
-    instagram, come se ci fosse l'account secondario."""
+    """Una finta lettura dei video: aggiunge una trascrizione all'anteprima, o fallisce."""
 
-    def __init__(self, text="Transcript:\nguanciale e uova", fail=None, instagram=False):
+    def __init__(self, text="Transcript:\nguanciale e uova", fail=None):
         self.text, self.fail, self.urls = text, fail, []
-        self.platforms = ("youtube", "instagram") if instagram else ("youtube",)
+        self.platforms = ("youtube", "instagram")
 
     async def read(self, url, preview):
         self.urls.append(url)
@@ -277,16 +276,45 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((video.title, video.content), ("Carbonara perfetta", "Transcript:\nguanciale e uova"))
         self.assertEqual(videos.urls, [url])  # solo i video, non le pagine
 
-    async def test_a_reel_is_heard_only_with_the_secondary_account(self):
-        reel = "https://www.instagram.com/reel/C0ffee/"
-        self.web.oembed("instagram", reel, {"title": "Pasta e patate\nIngredienti: pasta", "author_name": "chef"})
-        for instagram, expected in ((False, None), (True, "Transcript:\noggi la pasta e patate")):
-            with self.subTest(instagram=instagram):
-                videos = FakeVideos("Transcript:\noggi la pasta e patate", instagram=instagram)
-                reading = self.with_claude(reads=True, videos=videos)
-                item = self.memory.save(42, 70 + instagram, 0, [Draft("link", url=reel + "?n=" + str(instagram))])[0].item
-                extract = await reading._read_link(item)
-                self.assertEqual((len(videos.urls), extract.text if instagram else None), (int(instagram), expected))
+    def reel(self, caption):
+        url = "https://www.instagram.com/reel/C0ffee/"
+        self.web.oembed("instagram", url, {"title": caption, "author_name": "chef"})
+        return url
+
+    async def test_a_reel_whose_caption_says_enough_is_not_downloaded(self):
+        url = self.reel("Pasta e patate\nIngredienti: pasta, patate, provola")
+        videos = FakeVideos("Transcript:\noggi la pasta e patate")
+        p = self.with_claude(reads=True, videos=videos)
+        self.claude.on("describe", lambda m: fake_claude.description("recipe", "Pasta e patate", summary="Pasta e patate."))
+        await self.handle(update(1, url), processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        self.assertEqual((videos.urls, self.items()[0].summary), ([], "Pasta e patate."))
+
+    async def test_a_reel_whose_caption_says_too_little_is_downloaded_without_an_account(self):
+        url = self.reel("#food #yummy")
+        videos = FakeVideos("Transcript:\noggi la pasta e patate")
+        p = self.with_claude(reads=True, videos=videos)
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "recipe", "Pasta e patate", summary="Pasta e patate." if "Transcript" in m["content"] else None))
+        await self.handle(update(1, url), processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        [item] = self.items()
+        self.assertEqual((videos.urls, item.summary), ([url], "Pasta e patate."))
+        self.assertIn("oggi la pasta e patate", item.content)
+        self.assertEqual(len(self.claude.of("describe")), 2)  # l'anteprima, poi anche il video
+        self.assertEqual(self.replies(), [])
+
+    async def test_a_reel_instagram_does_not_give_keeps_its_preview_and_sazed_asks(self):
+        url = self.reel("#food")
+        videos = FakeVideos(fail="Instagram sent an empty media response")
+        p = self.with_claude(reads=True, videos=videos)
+        self.claude.on("describe", lambda m: fake_claude.description("video", None, useful=False))
+        with self.assertLogs("sazed_agent.lanes", "WARNING") as logs:
+            await self.handle(update(1, url), processor=p)
+            await self.until(lambda: self.replies())
+        self.assertEqual(self.items()[0].extraction, "partial")
+        self.assertIn("Condividi → Scarica", self.replies()[0])
+        self.assertNotIn("C0ffee", "\n".join(logs.output))  # i link dell'utente non vanno nei log
 
     async def test_when_yt_dlp_fails_the_preview_stays(self):
         url = "https://www.youtube.com/watch?v=abc"

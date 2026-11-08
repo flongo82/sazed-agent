@@ -15,6 +15,8 @@ MESSAGES = {
         "unknown": "di questo non sono riuscito a capire di che cosa parla: scrivimi due parole e le terrò insieme.",
         "unreadable": ("questo non sono riuscito a leggerlo, quindi non so di che cosa parla: scrivimi due "
                        "parole e le terrò insieme."),
+        "reel_hint": ("Se Instagram ti lascia scaricare il reel (Condividi → Scarica), puoi anche mandarmelo "
+                      "come video."),
         "file_gone": lambda title=None: (
             f"non riesco più a rimandarti {f'«{title}»' if title else 'questo file'}: su Telegram non c'è più."),
         "status": lambda name, pending, failed, kept: (
@@ -36,6 +38,8 @@ MESSAGES = {
         "unknown": "I couldn't tell what this is about: write me a few words and I'll keep them with it.",
         "unreadable": ("I couldn't read this, so I don't know what it is about: write me a few words and I'll keep "
                        "them with it."),
+        "reel_hint": ("If Instagram lets you download the reel (Share → Download), you can also send it to me "
+                      "as a video."),
         "file_gone": lambda title=None: (
             f"I can't send you {f'“{title}”' if title else 'this file'} back any more: it is gone from Telegram."),
         "status": lambda name, pending, failed, kept: (

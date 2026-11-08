@@ -7,10 +7,11 @@ YouTube. Si comincia dall'anteprima pubblica (titolo, canale, copertina), poi yt
 - se non ci sono sottotitoli, l'audio, che chi ascolta (Whisper) trascrive: al più la prima
   mezz'ora, scaricando solo quella.
 
-Instagram, se c'è un account secondario (i suoi cookie, da scripts/setup-instagram.sh): oltre
-alla didascalia e alla copertina dell'anteprima, il video del reel, che chi ascolta trascrive e
-guarda (quattro fotogrammi, per le scritte sul video). Senza account Instagram non dà il video:
-resta l'anteprima, come per un post di sole foto o un carosello.
+Instagram: il video del reel, che chi ascolta trascrive e guarda (i fotogrammi, per le scritte
+sul video), oltre alla didascalia e alla copertina dell'anteprima. Lo si chiede senza account,
+come un visitatore qualunque: Instagram a volte lo dà e a volte no (e allora resta l'anteprima,
+come per un post di sole foto o un carosello). Se ci sono i cookie di un account secondario
+(scripts/setup-instagram.sh), facoltativi, si usano quelli.
 
 yt-dlp parte senza configurazione né cache, e mai su una playlist intera; senza cookie, tranne
 quelli dell'account secondario per Instagram, passati come copia: yt-dlp riscrive il file dei
@@ -41,8 +42,8 @@ class Videos:
     def __init__(self, listener=None, command=("yt-dlp",), cookies=None):
         self.listener = listener  # senza, solo i sottotitoli
         self.command = list(command)
-        self.cookies = Path(cookies) if cookies else None  # dell'account secondario di Instagram
-        self.platforms = ("youtube",) + (("instagram",) if self.cookies else ())  # TikTok per ora non serve
+        self.cookies = Path(cookies) if cookies else None  # di un account secondario di Instagram, facoltativi
+        self.platforms = ("youtube", "instagram")  # TikTok per ora non serve
 
     async def read(self, url, preview):
         """Ciò che si legge di un video oltre all'anteprima (preview): un Extract con la
@@ -70,14 +71,17 @@ class Videos:
                        "\n\n".join(p for p in parts if p) or preview.text, complete, preview.images)
 
     async def _instagram(self, url, preview):
-        """Un reel con l'account secondario: il video, che chi ascolta trascrive e guarda, oltre a
-        didascalia e copertina. Un post senza video (foto, carosello) resta all'anteprima."""
-        if self.cookies is None or not self.cookies.is_file() or self.listener is None:
-            raise ReadError("per il video di Instagram servono l'account secondario e Whisper")
+        """Un reel: il video, che chi ascolta trascrive e guarda, oltre a didascalia e copertina;
+        senza account, o con i cookie di quello secondario se ci sono. Un post senza video (foto,
+        carosello) resta all'anteprima, come un reel che Instagram non dà."""
+        if self.listener is None:
+            raise ReadError("per il video di un reel serve Whisper")
         with tempfile.TemporaryDirectory(prefix="sazed-") as work:
             work = Path(work)
-            cookies = work / "cookies.txt"
-            shutil.copyfile(self.cookies, cookies)
+            cookies = None
+            if self.cookies is not None and self.cookies.is_file():
+                cookies = work / "cookies.txt"
+                shutil.copyfile(self.cookies, cookies)
             info = await self._info(url, cookies)
             if "entries" in info or not (info.get("formats") or info.get("url")):
                 raise ReadError("post senza un video solo: resta l'anteprima", permanent=True)

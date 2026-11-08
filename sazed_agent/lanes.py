@@ -18,7 +18,9 @@ le domande che non aspettano dietro una lettura lunga.
   di embedding (se c'è), per cercare anche per significato; uno alla volta, a priorità bassa;
 - lettura: un elemento alla volta, prima quelli che qualcuno aspetta (un vocale da
   interpretare, ciò di cui parla una domanda). I link si leggono alla fonte, e dei video di
-  YouTube anche descrizione e sottotitoli (o l'audio); i file si scaricano da Telegram in una
+  YouTube anche descrizione e sottotitoli (o l'audio); di un reel di Instagram prima didascalia
+  e copertina, e solo se non bastano a capire di che cosa parla il video, chiesto senza account
+  (se Instagram lo dà); i file si scaricano da Telegram in una
   cartella temporanea: le foto Claude le guarda, vocali, audio e video si ascoltano (e dei video
   si prendono anche dei fotogrammi). Dei documenti di norma si leggono solo i dati del file e le
   prime pagine; se non dicono di che cosa parla un'opera pubblicata, si cerca la sua scheda in
@@ -61,6 +63,9 @@ THREAD_WINDOW, THREAD_LIMIT = 3 * 3600, 10   # il filo: i messaggi delle ultime 
 READ_WAIT = 600     # quanto una domanda aspetta la lettura degli elementi di cui parla
 MEANING_BATCH = 8   # schede calcolate insieme
 MEANING_PAUSE = 300 # dopo un errore di llama-server, prima di riprovare
+# Le piattaforme di cui il video si scarica solo se l'anteprima non basta: meno richieste, e
+# Instagram limita chi ne fa troppe senza account.
+VIDEO_IF_NEEDED = ("instagram",)
 LISTEN_WAIT = 3600  # quanto un vocale aspetta la trascrizione, anche dietro un video lungo
 # Ciò che si sa leggere, e con che cosa: i link con il lettore, le foto con Claude (che le
 # guarda), vocali, audio e video con chi ascolta (Whisper), i documenti con chi li sfoglia.
@@ -483,6 +488,10 @@ class Processor:
         if self.claude is not None and (extract.text or extract.title or extract.images):
             try:
                 description = await self._describe(item, extract)
+                if self._video_needed(item, extract, description):
+                    richer = await self._video_after_all(item, extract)
+                    if richer is not None:
+                        extract, description = richer, await self._describe(item, richer)
             except ClaudeError as err:
                 if err.config_error:
                     log.error("lettura dell'elemento %s rimandata di %g s: %s", item.id, self.config_pause, err)
@@ -526,13 +535,14 @@ class Processor:
         if current is None or current.note:
             return
         t, hello = self._voice(entry)
+        text = t[reason] + (f" {t['reel_hint']}" if current.platform in VIDEO_IF_NEEDED else "")
         try:
-            reply_id = await self.telegram.send_message(item.chat_id, f"{hello}, {t[reason]}", reply_to=item.message_id)
+            reply_id = await self.telegram.send_message(item.chat_id, f"{hello}, {text}", reply_to=item.message_id)
         except TelegramError as err:
             log.warning("elemento %s: avviso di contenuto incomprensibile non inviato: %s", item.id, err)
             return
         if entry.reply_message_id is None:
-            self.journal.set_reply(entry.update_id, reply_id, t[reason])
+            self.journal.set_reply(entry.update_id, reply_id, text)
         log.info("elemento %s: non si capisce di che cosa parla, chieste due parole all'utente", item.id)
 
     async def _describe(self, item, extract):
@@ -582,13 +592,43 @@ class Processor:
         resolved = await self.reader.resolve(item.url)  # un link breve rimasto tale all'ingresso
         if resolved != item.url and self.memory.relink(item.id, resolved):
             log.info("elemento %s: link breve portato al suo indirizzo", item.id)
-        extract = await self.reader.read(resolved)
-        if self.videos is not None and parse_link(resolved).platform in self.videos.platforms:
+        platform = parse_link(resolved).platform
+        videos = self.videos is not None and platform in self.videos.platforms
+        try:
+            extract = await self.reader.read(resolved)
+        except ReadError:
+            if not (videos and platform in VIDEO_IF_NEEDED):
+                raise
+            extract = await self._video_after_all(item, Extract(None, None, None, False))  # niente anteprima
+            if extract is None:
+                raise
+            return extract
+        if videos and platform not in VIDEO_IF_NEEDED:
             try:
                 extract = await self.videos.read(resolved, extract)
-            except ReadError as err:  # YouTube che blocca, cookie di Instagram scaduti: riprovare subito non aiuta
+            except ReadError as err:  # YouTube che blocca: riprovare subito non aiuta
                 log.warning("elemento %s: del video resta l'anteprima (%s)", item.id, err)
         return extract
+
+    def _video_needed(self, item, extract, description):
+        """True se di un reel didascalia e copertina non bastano: Claude non ne capisce nulla o non
+        ne sa fare un riassunto (senza Claude: se non c'è la didascalia)."""
+        current = self.memory.get(item.id)
+        if (self.videos is None or current is None or current.source != "link"
+                or current.platform not in VIDEO_IF_NEEDED or current.platform not in self.videos.platforms):
+            return False
+        if description is None:
+            return not extract.text
+        return not description.useful or not description.summary
+
+    async def _video_after_all(self, item, preview):
+        """Il video di un reel di cui l'anteprima non basta, chiesto senza account; None se
+        Instagram non lo dà: resta l'anteprima."""
+        try:
+            return await self.videos.read(self.memory.get(item.id).url, preview)
+        except ReadError as err:
+            log.warning("elemento %s: il video del reel non si scarica (%s), resta l'anteprima", item.id, err)
+            return None
 
     async def _read_file(self, item):
         """Scarica il file da Telegram in una cartella temporanea e lo legge: una foto la

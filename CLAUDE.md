@@ -55,8 +55,9 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
 - `sazed_agent/lookup.py`: le schede delle opere pubblicate da fonti libere (Open Library,
   Crossref, Wikipedia), con uno User-Agent che dice chi chiama
 - `sazed_agent/videos.py`: i video di YouTube con yt-dlp (senza configurazione, cookie, cache
-  né playlist), e i reel di Instagram con i cookie dell'account secondario (una copia, perché
-  yt-dlp li riscrive): video trascritto e quattro fotogrammi: descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
+  né playlist), e i reel di Instagram a cascata: prima didascalia e copertina, il video (senza
+  account; con i cookie facoltativi di un account secondario, passati come copia) solo se non
+  bastano. yt-dlp viene da pip (2026.10.21), perché quello di apt è troppo vecchio per Instagram: descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
   traduzioni), altrimenti l'audio per Whisper; gli errori non dicono quale video
 - `sazed_agent/mtproto.py`: i file oltre i 20 MB via MTProto (Telethon, token del bot, senza
   aggiornamenti), a pezzi da 512 KB in quattro parti insieme; la sessione in `secrets/mtproto/`

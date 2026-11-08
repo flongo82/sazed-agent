@@ -152,12 +152,15 @@ class InstagramTest(unittest.IsolatedAsyncioTestCase):
                 await self.videos.read(REEL, Extract(None, None, "didascalia", False, COVER))
             self.assertTrue(ctx.exception.permanent)
 
-    async def test_without_the_account_instagram_is_not_for_yt_dlp(self):
+    async def test_without_an_account_the_reel_is_asked_like_any_visitor(self):
         plain = Videos(self.listener, command=(FAKE_YTDLP, str(self.plan)))
-        self.assertEqual((plain.platforms, self.videos.platforms), (("youtube",), ("youtube", "instagram")))
-        with self.assertRaises(ReadError):
-            await plain.read(REEL, Extract(None, None, "didascalia", False, COVER))
-        self.assertFalse((self.dir / "calls.json").exists())
+        self.assertEqual(plain.platforms, ("youtube", "instagram"))
+        self.will(info={"duration": 20, "formats": [{"format_id": "1"}]}, video="mp4 anonimo")
+        extract = await plain.read(REEL, Extract(None, "chef", None, False, COVER))
+        self.assertEqual(extract.text, "Transcript:\nOggi la pasta e patate")
+        for call in json.loads((self.dir / "calls.json").read_text()):
+            self.assertIn("--no-cookies", call)
+            self.assertNotIn("--cookies", call)
 
 
 if __name__ == "__main__":

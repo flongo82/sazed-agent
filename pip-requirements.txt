@@ -7,3 +7,9 @@
 jiter==0.17.0 \
     --hash=sha256:523c499235fb65add25d4bb01b1c4709ce695efdc7deb6c0a7bc515b5c44e0fb \
     --hash=sha256:dc0288ce39190ee33fe6e4ec73161eed34e7e2da509b525546ca061778d62b64
+
+# yt-dlp: apt ha la versione del 17 marzo 2026, precedente alla riscrittura di luglio della parte
+# su Instagram, da cui i reel pubblici tornano a leggersi senza un account. Versione uscita da
+# qualche settimana; una ruota sola, Python puro.
+yt-dlp==2026.10.21 \
+    --hash=sha256:94a3a3e2c423129d0bbd2f1be000c4171fa1226c29e251c84aff868f2851c247
