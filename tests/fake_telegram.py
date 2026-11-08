@@ -98,7 +98,7 @@ class FakeTelegram:
                                                               "description": "Bad Request: invalid file_id"})
         with self._lock:
             result = True
-            if method == "sendMessage":
+            if method in ("sendMessage", "copyMessage") or method.startswith("send") and method != "sendChatAction":
                 result = {"message_id": self._next_message_id}
                 self._next_message_id += 1
             if method == "getFile":

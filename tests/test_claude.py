@@ -1,12 +1,13 @@
 """Claude contro un finto server dell'API: le tre richieste, le risposte controllate, gli
 strumenti delle risposte, rifiuti ed errori."""
 
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
-from sazed_agent.claude import Claude, ClaudeError, Classification, Interpretation, view
+from sazed_agent.claude import Answer, Claude, ClaudeError, Classification, Interpretation, view
 from sazed_agent.coppermind import Coppermind, Draft
 from sazed_agent.journal import Journal
 from sazed_agent.reader import Extract
@@ -196,9 +197,9 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         turns = iter([tool("search_items", {"text": "carbonara", "kind": "recipe", "limit": 99}),
                       tool("get_item", {"id": self.old.id}), "ne hai una: https://example.com/x"])
         self.fake.on("answer", lambda messages: next(turns))
-        text = await self.claude.answer(self.earlier, "che ricette di carbonara ho?", [self.link], "it",
-                                        self.memory, "2026-11-06")
-        self.assertEqual(text, "ne hai una: https://example.com/x")
+        answer = await self.claude.answer(self.earlier, "che ricette di carbonara ho?", [self.link], "it",
+                                          self.memory, "2026-11-06")
+        self.assertEqual(answer, Answer("ne hai una: https://example.com/x"))
         requests = self.fake.of("answer")
         self.assertEqual(len(requests), 3)
         first = self.fake.messages("answer")[0]
@@ -209,17 +210,30 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         found = results[2]["content"][0]["content"]
         self.assertIn('"total": 1', found)
         self.assertIn("guanciale, uova, pecorino", results[4]["content"][0]["content"])
-        self.assertEqual({t["name"] for t in requests[0]["body"]["tools"]}, {"search_items", "get_item", "read_passages"})
+        self.assertEqual({t["name"] for t in requests[0]["body"]["tools"]}, {"search_items", "get_item", "read_passages",
+                                                                         "send_back"})
 
     async def test_a_spoken_question_is_answered_knowing_it_was_heard(self):
         await self.claude.answer([], "che ricette di carbonara ho?", [], "it", self.memory, "2026-11-08", spoken=True)
         self.assertTrue(self.fake.messages("answer")[0]["spoken"])
         self.assertIn("names above all", self.fake.of("answer")[0]["body"]["system"])
 
+    async def test_an_answer_can_choose_files_to_send_back(self):
+        others = [o.item for o in self.memory.save(42, 13, 1_790_000_000, [
+            Draft("document", media={"file_id": f"d{n}", "file_unique_id": f"D{n}"}) for n in range(6)])]
+        turns = iter([tool("send_back", {"ids": [self.photo.id, self.link.id, 999, self.photo.id]}),
+                      tool("send_back", {"ids": [o.id for o in others]}), "eccoli."])
+        self.fake.on("answer", lambda messages: next(turns))
+        answer = await self.claude.answer([], "mandami le foto", [], "it", self.memory, "2026-11-08")
+        self.assertEqual(answer, Answer("eccoli.", (self.photo.id, *(o.id for o in others[:4]))))  # al più 5
+        result = json.loads(self.fake.of("answer")[1]["body"]["messages"][2]["content"][0]["content"])
+        self.assertEqual((result["will_send_after_reply"], result["not_files"]), ([self.photo.id], [self.link.id, 999]))
+        self.assertIn("send back", self.fake.of("answer")[0]["body"]["system"])
+
     async def test_a_wrong_tool_input_is_an_error_for_claude_not_for_the_agent(self):
         turns = iter([tool("search_items", {"kind": "romanzo"}), tool("get_item", {"id": 999}), "niente."])
         self.fake.on("answer", lambda messages: next(turns))
-        self.assertEqual(await self.claude.answer([], "romanzi?", [], "it", self.memory, "2026-11-06"), "niente.")
+        self.assertEqual((await self.claude.answer([], "romanzi?", [], "it", self.memory, "2026-11-06")).text, "niente.")
         results = self.fake.of("answer")[2]["body"]["messages"]
         self.assertTrue(results[2]["content"][0]["is_error"])
         self.assertIn("no item", results[4]["content"][0]["content"])

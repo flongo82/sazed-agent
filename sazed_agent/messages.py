@@ -11,6 +11,9 @@ MESSAGES = {
         "unknown_command": lambda command: f"non conosco il comando {command}.",
         "unsupported": "questo tipo di messaggio non so ancora custodirlo.",
         "no_answer": "non sono riuscito a rispondere a questa domanda: riprova tra poco.",
+        "here_it_is": lambda files: "eccolo." if files == 1 else "eccoli.",
+        "file_gone": lambda title=None: (
+            f"non riesco più a rimandarti {f'«{title}»' if title else 'questo file'}: su Telegram non c'è più."),
         "status": lambda name, pending, failed, kept: (
             f"l'agente {name} è collegato. Messaggi da processare: {pending}, in errore: {failed}. "
             f"Elementi custoditi: {kept}."
@@ -26,6 +29,9 @@ MESSAGES = {
         "unknown_command": lambda command: f"I don't know the command {command}.",
         "unsupported": "I can't keep this kind of message yet.",
         "no_answer": "I couldn't answer this question: try again in a little while.",
+        "here_it_is": lambda files: "here it is." if files == 1 else "here they are.",
+        "file_gone": lambda title=None: (
+            f"I can't send you {f'“{title}”' if title else 'this file'} back any more: it is gone from Telegram."),
         "status": lambda name, pending, failed, kept: (
             f"the {name} agent is connected. Messages to process: {pending}, failed: {failed}. "
             f"Items kept: {kept}."

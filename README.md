@@ -68,7 +68,9 @@ work is about, its card is looked up in free catalogues (Open Library, Crossref,
 Claude uses it only if it speaks of the same work; personal documents are never looked up.
 Ask to read a document in full, with it or later (replying to it, or naming it), and the whole
 text is read, summarised as a whole and searchable passage by passage; the answer comes once the
-reading is done. Next: files beyond 20 MB.
+reading is done. Ask for a file you kept ("send me the rent contract") and, after the answer, the
+bot copies its original message back into the chat, or resends the file if that message is gone.
+Next: files beyond 20 MB.
 The architecture, the reasons behind it and the protocol between the two parts are described
 in the README of `sazed-bot`.
 

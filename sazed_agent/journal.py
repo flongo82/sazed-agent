@@ -11,7 +11,7 @@ finale. Uno stato può solo avanzare: dopo un arresto si riprende da quello regi
 L'interpretazione del modello si annota appena arriva (set_interpretation): dopo un arresto si
 riusa quella, senza chiederla una seconda volta. Lo stesso vale per gli indirizzi veri dei link
 brevi (set_links) e per il testo della risposta (set_reply), che serve a tenere il filo della
-conversazione (recent).
+conversazione (recent), con i file che la risposta rimanda dopo di sé (send_back).
 """
 
 import json
@@ -41,14 +41,15 @@ CREATE TABLE IF NOT EXISTS inbox (
   payload          TEXT    NOT NULL,
   interpretation   TEXT,
   links            TEXT,
-  reply_text       TEXT
+  reply_text       TEXT,
+  send_back        TEXT
 );
 CREATE INDEX IF NOT EXISTS inbox_due ON inbox (lane, state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS inbox_chat ON inbox (chat_id, received_at);
 """
 
 # Colonne aggiunte dopo la prima versione: i registri di prima le ricevono all'avvio.
-ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT"}
+ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT", "send_back": "TEXT"}
 
 
 class JournalError(Exception):
@@ -72,6 +73,7 @@ class Entry:
     interpretation: dict | None
     links: dict | None = None        # link breve → indirizzo vero
     reply_text: str | None = None
+    send_back: tuple = ()            # gli elementi di cui la risposta rimanda il messaggio originale
 
 
 class Journal:
@@ -160,13 +162,15 @@ class Journal:
                 (state, reply_message_id, self.clock(), update_id),
             )
 
-    def set_reply(self, update_id, reply_message_id, text=None):
-        """Annota il message_id della risposta appena Telegram lo restituisce, e il suo testo."""
+    def set_reply(self, update_id, reply_message_id, text=None, send_back=()):
+        """Annota il message_id della risposta appena Telegram lo restituisce, il suo testo e gli
+        elementi di cui rimanda il messaggio originale."""
         with self.transaction():
             self.db.execute(
                 "UPDATE inbox SET reply_message_id = ?, reply_text = COALESCE(?, reply_text),"
-                " updated_at = ? WHERE update_id = ?",
-                (reply_message_id, text, self.clock(), update_id),
+                " send_back = COALESCE(?, send_back), updated_at = ? WHERE update_id = ?",
+                (reply_message_id, text, json.dumps(list(send_back)) if send_back else None, self.clock(),
+                 update_id),
             )
 
     def set_links(self, update_id, links):
@@ -274,4 +278,5 @@ def _entry(row):
         update=json.loads(row["payload"]),
         interpretation=json.loads(row["interpretation"]) if row["interpretation"] else None,
         links=json.loads(row["links"]) if row["links"] else None, reply_text=row["reply_text"],
+        send_back=tuple(json.loads(row["send_back"])) if row["send_back"] else (),
     )

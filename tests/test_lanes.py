@@ -547,6 +547,55 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(([m["message"] for m in second["conversation"]], second["current"]["reply_to"]), ([10], 10))
         self.assertEqual([m["message"] for m in third["conversation"]], [20])  # un giorno fa: fuori dal filo
 
+    # --- R6: i file chiesti tornano in chat ---
+
+    async def ask_for_a_file(self, *rules):
+        """Un contratto mandato come file, poi la richiesta di riaverlo: le risposte e le chiamate a Telegram."""
+        for rule in rules:
+            self.telegram.rule(rule)
+        p = self.with_claude()
+        self.claude.on("interpret", lambda m: interpretation(question=m["current"]["words"]))
+        self.claude.on("answer", lambda messages: tool("send_back", {"ids": [1]}) if len(messages) == 1 else "eccolo.")
+        await self.handle(update(1, document={"file_id": "c", "file_unique_id": "C", "file_name": "contratto.pdf"}),
+                          update(2, "mandami il contratto d'affitto"), processor=p)
+        return self.replies(), [(m, prm) for m, prm, status in self.telegram.calls if m != "setMessageReaction"]
+
+    async def test_a_file_asked_for_comes_back_after_the_answer(self):
+        replies, calls = await self.ask_for_a_file()
+        self.assertEqual(replies, ["Ciao Ada, eccolo."])
+        methods = [m for m, _ in calls if m != "sendChatAction"]
+        self.assertEqual(methods, ["sendMessage", "copyMessage"])  # prima la risposta, poi il file
+        copy = calls[-1][1]
+        self.assertEqual((copy["from_chat_id"], copy["message_id"], copy["reply_parameters"]["message_id"]),
+                         (42, 10, 20))
+        self.assertEqual(self.journal.get(2).send_back, (1,))
+
+    async def test_files_sent_back_without_words_get_two_of_them(self):
+        p = self.with_claude()
+        self.claude.on("interpret", lambda m: interpretation(question=m["current"]["words"]))
+        self.claude.on("answer", lambda messages: tool("send_back", {"ids": [1]}) if len(messages) == 1 else "")
+        await self.handle(update(1, photo=[{"file_id": "p", "file_unique_id": "P"}]), update(2, "rimandamela"),
+                          processor=p)
+        self.assertEqual(self.replies(), ["Ciao Ada, eccolo."])
+        self.assertEqual(len(self.telegram.ok_calls("copyMessage")), 1)
+
+    async def test_a_file_whose_message_is_gone_is_sent_from_telegram_or_said_gone(self):
+        _, calls = await self.ask_for_a_file(lambda m, prm: 400 if m == "copyMessage" else None)
+        self.assertEqual(calls[-1][0], "sendDocument")
+        self.assertEqual(calls[-1][1]["document"], "c")
+
+    async def test_a_file_gone_from_telegram_is_said_so(self):
+        replies, _ = await self.ask_for_a_file(lambda m, prm: 400 if m in ("copyMessage", "sendDocument") else None)
+        self.assertEqual(replies, ["Ciao Ada, eccolo.", "Ciao Ada, non riesco più a rimandarti «contratto.pdf»: "
+                                                        "su Telegram non c'è più."])
+
+    async def test_a_hiccup_while_sending_a_file_back_never_repeats_the_answer(self):
+        self.telegram.fail("copyMessage", 500)
+        replies, calls = await self.ask_for_a_file()
+        self.assertEqual(replies, ["Ciao Ada, eccolo."])
+        self.assertEqual(len(self.telegram.ok_calls("copyMessage")), 1)
+        self.assertEqual(len(self.claude.of("answer")), 2)  # Claude non si richiama
+
     async def test_a_question_does_not_wait_forever_for_a_reading(self):
         self.web.route("https://example.com/giu", 503)
         p = self.with_claude(reads=True, delays=(30,), read_wait=0.3)

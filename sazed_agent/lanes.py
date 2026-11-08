@@ -11,8 +11,9 @@ le domande che non aspettano dietro una lettura lunga.
   vocale che porta solo una domanda o un commento non resta in coppermind;
 - risposte (stati saved e answered): una domanda aspetta che siano letti gli elementi di cui
   parla, al massimo read_wait secondi dal suo arrivo, poi Claude risponde cercando in
-  coppermind. Da qui passano anche le risposte fisse (comando sconosciuto, messaggio che non si
-  sa custodire);
+  coppermind. Se l'utente chiede un file, dopo la risposta il codice gliene rimanda il messaggio
+  originale (copiato; se non c'è più, il file dal suo file_id). Da qui passano anche le risposte
+  fisse (comando sconosciuto, messaggio che non si sa custodire);
 - lettura: un elemento alla volta, prima quelli che qualcuno aspetta (un vocale da
   interpretare, ciò di cui parla una domanda). I link si leggono alla fonte, e dei video di
   YouTube anche descrizione e sottotitoli (o l'audio); i file si scaricano da Telegram in una
@@ -41,7 +42,7 @@ from pathlib import Path
 
 from . import intake
 from .claude import ClaudeError, Interpretation, view
-from .coppermind import Coppermind, Draft, parse_link, unique
+from .coppermind import FILES, Coppermind, Draft, parse_link, unique
 from .messages import STATUS_COMMANDS, language_for, messages_for
 from .reader import IMAGE_TYPES, MAX_IMAGE, Extract, ReadError
 from .telegram import FILE_MAX, TelegramError
@@ -364,10 +365,12 @@ class Processor:
                 return
             if entry.reply_message_id is None:
                 t, hello = self._voice(entry)
-                text = await self._reply_text(entry, reading, meaning, t)
+                text, send_back = await self._reply_text(entry, reading, meaning, t)
                 reply_id = await self.telegram.send_message(entry.chat_id, f"{hello}, {text}",
                                                             reply_to=entry.message_id)
-                self.journal.set_reply(entry.update_id, reply_id, text)
+                self.journal.set_reply(entry.update_id, reply_id, text, send_back)
+                entry = self.journal.get(entry.update_id)
+            await self._send_back(entry)  # dopo un arresto si rimandano tutti: meglio un doppione
             self.journal.advance(entry.update_id, "answered")
             state = "answered"
         if state == "answered":
@@ -375,16 +378,45 @@ class Processor:
             log.info("elemento %s completato: risposta inviata", entry.update_id)
 
     async def _reply_text(self, entry, reading, meaning, t):
+        """Il testo della risposta e gli elementi di cui rimandare il messaggio originale."""
         if reading.command:
-            return t["unknown_command"](reading.command)
+            return t["unknown_command"](reading.command), ()
         if not meaning.question or self.claude is None:
-            return t["unsupported"]
+            return t["unsupported"], ()
         about = [i for i in (self.memory.get(item_id) for item_id in meaning.about) if i is not None]
         today = time.strftime("%Y-%m-%d", time.localtime(self.clock()))
         async with self._typing(entry.chat_id):
-            text = await self.claude.answer(self._thread(entry, reading), meaning.question, about,
-                                            self._language(entry.update), self.memory, today, bool(meaning.spoken))
-        return text or t["no_answer"]
+            answer = await self.claude.answer(self._thread(entry, reading), meaning.question, about,
+                                              self._language(entry.update), self.memory, today, bool(meaning.spoken))
+        if answer is None:
+            return t["no_answer"], ()
+        return answer.text or t["here_it_is"](len(answer.send_back)), answer.send_back
+
+    async def _send_back(self, entry):
+        """I file che la risposta rimanda, dopo il suo testo: il messaggio originale, copiato
+        nella chat (R6); se non c'è più, il file dal suo file_id; se Telegram non ha più neanche
+        quello, lo si dice. Un errore da riprovare fa ripetere il passo."""
+        for item in (self.memory.get(item_id) for item_id in entry.send_back):
+            if item is None or item.source not in FILES:
+                continue
+            try:
+                await self.telegram.copy_message(entry.chat_id, item.chat_id, item.message_id,
+                                                 reply_to=entry.message_id)
+                continue
+            except TelegramError as err:
+                if not err.permanent:
+                    raise
+                log.info("elemento %s: il messaggio originale non si copia (%s), si rimanda il file", item.id, err)
+            try:
+                await self.telegram.send_file(entry.chat_id, item.source, (item.media or {}).get("file_id"),
+                                              reply_to=entry.message_id)
+            except TelegramError as err:
+                if not err.permanent:
+                    raise
+                log.warning("elemento %s: il file non si rimanda (%s)", item.id, err)
+                t, hello = self._voice(entry)
+                await self.telegram.send_message(entry.chat_id, f"{hello}, {t['file_gone'](item.title)}",
+                                                 reply_to=entry.message_id)
 
     # --- lettura ---
 

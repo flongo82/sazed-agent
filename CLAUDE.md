@@ -30,7 +30,8 @@ YouTube con yt-dlp (descrizione, sottotitoli nella lingua originale o, se mancan
 descrizione dal contenuto. Le parole dette in un vocale valgono come quelle scritte: una domanda
 fatta a voce ha la sua risposta. Documenti (PDF, EPUB, DOCX, ODT, testo) letti in parte come vuole
 R9, con le schede di Open Library, Crossref e Wikipedia per le opere pubblicate senza abstract, e
-letti tutti solo su richiesta. Prossima parte: file oltre i 20 MB (MTProto) e riproporre un file.
+letti tutti solo su richiesta. I file chiesti tornano in chat (R6). Prossima parte: file oltre i
+20 MB (MTProto).
 
 ## Struttura
 
@@ -120,7 +121,9 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
 - Il codice salva, il modello interpreta: ingresso, link e file si custodiscono prima di
   chiamare Claude; Claude restituisce come dati strutturati a che cosa servono le parole e la
   descrizione di ciò che si è letto; il codice controlla (elementi solo fra quelli mostrati) e
-  scrive. Per le domande Claude ha solo strumenti di lettura su coppermind, mai shell o file.
+  scrive. Per le domande Claude ha solo strumenti di lettura su coppermind, mai shell o file, più
+  `send_back`, che sceglie i file da rimandare: li rimanda il codice, dopo la risposta, solo
+  nella chat dell'utente e al massimo cinque.
 - Quattro corsie: comandi, ingresso, risposte, lettura. Domande e comandi non aspettano mai
   dietro una lettura; una domanda aspetta solo la lettura degli elementi di cui parla, al
   massimo `READ_WAIT`. Appena arriva un messaggio, 👍 ne segnala la presa in carico: ciò che si

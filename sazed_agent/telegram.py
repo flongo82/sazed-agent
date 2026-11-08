@@ -19,6 +19,10 @@ import urllib.request
 
 FILE_MAX = 20_000_000  # l'API dei bot non dà file più grandi: oltre servirà MTProto
 CHUNK = 1 << 16
+# Per rimandare un file dal suo file_id: il metodo e il campo di ogni tipo di file.
+SEND_FILE = {"photo": ("sendPhoto", "photo"), "document": ("sendDocument", "document"),
+             "voice": ("sendVoice", "voice"), "audio": ("sendAudio", "audio"), "video": ("sendVideo", "video"),
+             "video_note": ("sendVideoNote", "video_note")}
 
 
 class TelegramError(Exception):
@@ -35,10 +39,20 @@ class Telegram:
 
     async def send_message(self, chat_id, text, reply_to=None):
         """Manda un messaggio, in risposta a reply_to se c'è. Restituisce il suo message_id."""
-        params = {"chat_id": chat_id, "text": text}
-        if reply_to is not None:
-            params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
-        result = await self.call("sendMessage", params)
+        result = await self.call("sendMessage", _replying({"chat_id": chat_id, "text": text}, reply_to))
+        return result["message_id"]
+
+    async def copy_message(self, chat_id, from_chat_id, message_id, reply_to=None):
+        """Copia un messaggio, con il suo file e la sua didascalia, in risposta a reply_to.
+        Restituisce il message_id della copia."""
+        result = await self.call("copyMessage", _replying(
+            {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id}, reply_to))
+        return result["message_id"]
+
+    async def send_file(self, chat_id, kind, file_id, reply_to=None):
+        """Rimanda un file che Telegram ha già, dal suo file_id e con il metodo del suo tipo."""
+        method, field = SEND_FILE[kind]
+        result = await self.call(method, _replying({"chat_id": chat_id, field: file_id}, reply_to))
         return result["message_id"]
 
     async def set_reaction(self, chat_id, message_id, emoji):
@@ -97,6 +111,12 @@ class Telegram:
         if not body.get("ok"):
             raise TelegramError(f"{method}: {body.get('description', 'risposta non valida')}", permanent=True)
         return body["result"]
+
+
+def _replying(params, reply_to):
+    if reply_to is not None:
+        params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+    return params
 
 
 def _json(err):
