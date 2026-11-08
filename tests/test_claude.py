@@ -18,6 +18,7 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         self.fake = FakeClaude().start()
         self.addCleanup(self.fake.stop)
         self.claude = Claude(KEY, self.fake.api_base, "claude-haiku-5-5", timeout=5, max_retries=0)
+        self.addAsyncCleanup(self.claude.close)
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir)
         journal = Journal(self.dir / "coppermind.db")
@@ -147,6 +148,48 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((message["images"], message["author"], message["content"]), (1, "pasticcere", ""))
         self.assertIn("cover of a video", request["body"]["system"])
 
+    async def test_a_document_comes_with_its_authors_and_whether_it_was_published(self):
+        [doc] = [o.item for o in self.memory.save(42, 12, 1_790_000_000, [
+            Draft("document", media={"file_id": "d", "file_unique_id": "D", "file_name": "pozzo.pdf"})])]
+        self.fake.on("describe", lambda m: description("book", "Il pozzo dell'ascensione", ["fantasy"], None,
+                                                       ["Brandon Sanderson", " ", "Brandon Sanderson"], True))
+        got = await self.claude.describe(doc, Extract(None, None, "Brandon Sanderson\nIl pozzo", False), "it")
+        self.assertEqual((got.kind, got.authors, got.published, got.summary),
+                         ("book", ("Brandon Sanderson",), True, None))
+        schema = self.fake.of("describe")[0]["body"]["output_config"]["format"]["schema"]
+        self.assertIn("published", schema["properties"])
+        found = [{"source": "Open Library", "title": "The Well of Ascension", "text": "Vin and Elend rule."}]
+        await self.claude.describe(doc, Extract(None, None, "x" * 50_000, True), "it", found=found, whole=True)
+        message = self.fake.messages("describe")[1]
+        self.assertEqual((message["found_online"], len(message["content"]), message["partial"]), (found, 50_000, False))
+        self.assertIn("never mix works", self.fake.of("describe")[1]["body"]["system"])
+        self.fake.on("describe", lambda m: description("article", "Torta", published=True))
+        self.assertFalse((await self.claude.describe(self.link, Extract("Torta", None, "mele", True), "it")).published)
+
+    async def test_asking_to_read_a_document_in_full_is_a_question_about_it(self):
+        [doc] = [o.item for o in self.memory.save(42, 12, 1_790_000_000, [
+            Draft("document", media={"file_id": "d", "file_unique_id": "D"})])]
+        self.fake.on("interpret", lambda m: interpretation(read_in_full=[doc.id, 999]))
+        meaning = await self.claude.interpret([], "leggilo tutto", [doc], "it")
+        self.assertEqual((meaning.read_in_full, meaning.question, meaning.about),
+                         ((doc.id,), "leggilo tutto", (doc.id,)))
+        self.fake.on("interpret", lambda m: interpretation(read_in_full_named="il pozzo",
+                                                           question="leggi tutto il pozzo"))
+        meaning = await self.claude.interpret([], "leggi tutto il pozzo", [], "it")
+        self.assertEqual((meaning.read_in_full, meaning.read_in_full_named), ((), "il pozzo"))
+        self.assertEqual(Interpretation.from_dict(meaning.to_dict()), meaning)
+
+    async def test_an_answer_can_read_the_passages_of_a_long_text(self):
+        self.memory.read_done(self.old.id, "complete", content="\n".join(
+            ["preambolo " * 200, "Il Lord Reggente cade.", "epilogo " * 200]))
+        turns = iter([tool("read_passages", {"id": self.old.id, "text": "lord reggente"}),
+                      tool("read_passages", {"id": 999, "text": "x"}), "cade alla fine."])
+        self.fake.on("answer", lambda messages: next(turns))
+        await self.claude.answer([], "come finisce?", [self.old], "it", self.memory, "2026-11-08")
+        results = self.fake.of("answer")[2]["body"]["messages"]
+        self.assertIn("Il Lord Reggente cade.", results[2]["content"][0]["content"])
+        self.assertIn("no item", results[4]["content"][0]["content"])
+
     async def test_an_answer_can_search_and_read_items(self):
         self.memory.read_done(self.old.id, "complete", content="guanciale, uova, pecorino", title="Carbonara",
                               kind="recipe")
@@ -166,7 +209,7 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         found = results[2]["content"][0]["content"]
         self.assertIn('"total": 1', found)
         self.assertIn("guanciale, uova, pecorino", results[4]["content"][0]["content"])
-        self.assertEqual({t["name"] for t in requests[0]["body"]["tools"]}, {"search_items", "get_item"})
+        self.assertEqual({t["name"] for t in requests[0]["body"]["tools"]}, {"search_items", "get_item", "read_passages"})
 
     async def test_a_spoken_question_is_answered_knowing_it_was_heard(self):
         await self.claude.answer([], "che ricette di carbonara ho?", [], "it", self.memory, "2026-11-08", spoken=True)

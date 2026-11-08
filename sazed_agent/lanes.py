@@ -17,7 +17,10 @@ le domande che non aspettano dietro una lettura lunga.
   interpretare, ciò di cui parla una domanda). I link si leggono alla fonte, e dei video di
   YouTube anche descrizione e sottotitoli (o l'audio); i file si scaricano da Telegram in una
   cartella temporanea: le foto Claude le guarda, vocali, audio e video si ascoltano (e dei video
-  si prendono anche dei fotogrammi).
+  si prendono anche dei fotogrammi). Dei documenti di norma si leggono solo i dati del file e le
+  prime pagine; se non dicono di che cosa parla un'opera pubblicata, si cerca la sua scheda in
+  un catalogo libero. Tutto il testo solo se l'utente lo chiede: la richiesta è una domanda,
+  che ha risposta a lettura finita.
   Dal contenuto Claude ricava tipo, titolo, argomenti e riassunto. Una fonte che non si legge
   mette 🤷 sul messaggio.
 
@@ -40,7 +43,7 @@ from . import intake
 from .claude import ClaudeError, Interpretation, view
 from .coppermind import Coppermind, Draft, parse_link, unique
 from .messages import STATUS_COMMANDS, language_for, messages_for
-from .reader import Extract, ReadError
+from .reader import IMAGE_TYPES, MAX_IMAGE, Extract, ReadError
 from .telegram import FILE_MAX, TelegramError
 from .videos import PLATFORMS as VIDEO_PLATFORMS
 
@@ -52,8 +55,9 @@ THREAD_WINDOW, THREAD_LIMIT = 3 * 3600, 10   # il filo: i messaggi delle ultime 
 READ_WAIT = 600     # quanto una domanda aspetta la lettura degli elementi di cui parla
 LISTEN_WAIT = 3600  # quanto un vocale aspetta la trascrizione, anche dietro un video lungo
 # Ciò che si sa leggere, e con che cosa: i link con il lettore, le foto con Claude (che le
-# guarda), vocali, audio e video con chi ascolta (Whisper).
+# guarda), vocali, audio e video con chi ascolta (Whisper), i documenti con chi li sfoglia.
 LINKS, PICTURES, RECORDINGS = ("link",), ("photo",), ("voice", "audio", "video", "video_note")
+PAPERS = ("document",)
 SPOKEN = ("voice", "video_note")  # l'utente che parla, se non sono inoltrati
 
 
@@ -74,15 +78,17 @@ class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
                  typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None,
                  claude=None, reader=None, read_wait=READ_WAIT, listener=None, videos=None,
-                 listen_wait=LISTEN_WAIT):
+                 listen_wait=LISTEN_WAIT, documents=None, lookup=None):
         self.journal, self.telegram = journal, telegram
         self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
         self.claude = claude  # senza, le parole accompagnano i link o sono una nota, e nulla si descrive
         self.reader = reader  # senza, i link non si leggono
         self.listener = listener  # senza, vocali, audio e video non si ascoltano
         self.videos = videos  # senza, dei video di YouTube resta l'anteprima
+        self.documents = documents  # senza, i documenti non si leggono
+        self.lookup = lookup  # senza, di un libro senza abstract resta ciò che dicono le prime pagine
         self.readable = ((LINKS if reader is not None else ()) + (PICTURES if claude is not None else ())
-                         + (RECORDINGS if listener is not None else ()))
+                         + (RECORDINGS if listener is not None else ()) + (PAPERS if documents is not None else ()))
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
         self.retry_delays, self.typing_interval, self.idle_wait = retry_delays, typing_interval, idle_wait
         self.config_pause = config_pause  # attesa dopo un token rifiutato, senza contare tentativi
@@ -201,13 +207,18 @@ class Processor:
             drafts = [dataclasses.replace(d, note=meaning.comment if item.id in meaning.comment_on else None)
                       for d, item in pairs]
             if meaning.note:
-                described = dataclasses.asdict(meaning.description) if meaning.description else {}
+                d = meaning.description
+                described = {k: getattr(d, k) for k in ("kind", "title", "topics", "summary")} if d else {}
                 drafts.append(Draft("note", note=meaning.note, **described))
             self.memory.save(entry.chat_id, entry.message_id, self._sent_at(entry, reading), drafts)
             for item_id in meaning.comment_on:
                 if item_id not in mine:
                     self.memory.annotate(item_id, meaning.comment)
+            for item_id in meaning.read_in_full:  # la domanda che lo chiede aspetta la lettura
+                self.memory.read_in_full(item_id)
             self.journal.advance(entry.update_id, "saved")
+        if meaning.read_in_full:
+            self.wake["reading"].set()
         log.info("elemento %s in coppermind: %d link e file, %s%s", entry.update_id, len(pairs), _summary(meaning),
                  "; il vocale portava solo parole e non si custodisce" if forget else "")
         if self._needs_reply(reading, meaning):
@@ -251,7 +262,19 @@ class Processor:
         meaning = await self.claude.interpret(self._thread(entry, reading), reading.words, items,
                                               self._language(entry.update), reading.reply_to, spoken)
         log.info("elemento %s: per Claude %s", entry.update_id, _summary(meaning))
-        return meaning
+        return self._named(meaning)
+
+    def _named(self, meaning):
+        """Un documento da leggere tutto, chiamato per nome: si cerca fra i documenti. Se è uno
+        solo si legge; se sono di più, la risposta chiederà quale."""
+        if not meaning.read_in_full_named:
+            return meaning
+        found = self.memory.search(meaning.read_in_full_named, source="document", limit=3)
+        if not found.items:
+            found = self.memory.search(meaning.read_in_full_named, source="document", words="any", limit=3)
+        ids = tuple(i.id for i in found.items)
+        return dataclasses.replace(meaning, read_in_full=ids if len(ids) == 1 else (),
+                                   about=tuple(dict.fromkeys(meaning.about + ids)))
 
     def _needs_reply(self, reading, meaning):
         if reading.edited:
@@ -402,10 +425,14 @@ class Processor:
                 await self._react(item.chat_id, item.message_id, self.reactions.unreadable)
                 self._read_over()
             return
+        if not item.read_full and getattr(self.memory.get(item.id), "read_full", False):
+            log.info("elemento %s: ora va letto tutto, la lettura ricomincia", item.id)
+            self.wake["reading"].set()  # l'utente l'ha chiesto mentre lo si sfogliava
+            return
         description = None
         if self.claude is not None and (extract.text or extract.title or extract.images):
             try:
-                description = await self.claude.describe(item, extract, self._item_language(item))
+                description = await self._describe(item, extract)
             except ClaudeError as err:
                 if err.config_error:
                     log.error("lettura dell'elemento %s rimandata di %g s: %s", item.id, self.config_pause, err)
@@ -419,10 +446,24 @@ class Processor:
         d = description
         self.memory.read_done(item.id, "complete" if extract.complete else "partial", content=extract.text,
                               title=(d and d.title) or extract.title, kind=d and d.kind,
-                              topics=d.topics if d else (), summary=d and d.summary)
+                              topics=d.topics if d else (), summary=d and d.summary, authors=d.authors if d else ())
         log.info("elemento %s letto (%s)%s", item.id, "completo" if extract.complete else "in parte",
                  "" if d else ", senza descrizione")
         self._read_over()
+
+    async def _describe(self, item, extract):
+        """La descrizione di Claude. Di un'opera pubblicata letta solo in parte, se le prime pagine
+        non dicono di che cosa parla, Claude riguarda il documento con le schede trovate in rete."""
+        language = self._item_language(item)
+        whole = item.source in PAPERS and item.read_full
+        d = await self.claude.describe(item, extract, language, whole=whole)
+        if d is None or whole or not d.published or d.summary or not d.title or self.lookup is None:
+            return d
+        found = await self.lookup.find(d.title, d.authors, d.kind, language)
+        if not found:
+            return d
+        log.info("elemento %s: %d schede trovate in rete", item.id, len(found))
+        return await self.claude.describe(item, extract, language, found=found) or d
 
     def _read_over(self):
         """Una lettura è finita: chi la aspettava (un vocale da interpretare, una domanda) riparte."""
@@ -443,16 +484,22 @@ class Processor:
 
     async def _read_file(self, item):
         """Scarica il file da Telegram in una cartella temporanea e lo legge: una foto la
-        guarda Claude, il resto si ascolta."""
+        guarda Claude, un documento si sfoglia (o si legge tutto), il resto si ascolta. Un
+        documento che è un'immagine, un audio o un video si tratta come tale."""
         media = item.media or {}
         if (media.get("file_size") or 0) > FILE_MAX:
             raise ReadError("file oltre i 20 MB dell'API dei bot", permanent=True)
+        mime = media.get("mime_type") or ""
         with tempfile.TemporaryDirectory(prefix="sazed-") as work:
             path = Path(work) / "file"
             await self.telegram.download(await self.telegram.get_file(media["file_id"]), path)
-            if item.source in PICTURES:
-                return Extract(None, None, None, True, (("image/jpeg", path.read_bytes()),))
-            return await self.listener.listen(path, video=item.source in ("video", "video_note"))
+            if item.source in PICTURES or (item.source in PAPERS and mime in IMAGE_TYPES and self.claude
+                                           and path.stat().st_size <= MAX_IMAGE):
+                return Extract(None, None, None, True, ((mime or "image/jpeg", path.read_bytes()),))
+            if item.source in PAPERS and not (mime.startswith(("audio/", "video/")) and self.listener):
+                return await self.documents.read(path, media.get("file_name"), mime, full=item.read_full)
+            return await self.listener.listen(path, video=item.source in ("video", "video_note")
+                                              or mime.startswith("video/"))
 
     def _item_language(self, item):
         entry = self.journal.of_message(item.chat_id, item.message_id)
@@ -523,5 +570,7 @@ class Processor:
 def _summary(meaning):
     """Che cosa ha capito Claude, senza le parole dell'utente: per i log."""
     parts = [name for name, present in (("nota", meaning.note), ("commento", meaning.comment),
-                                        ("domanda", meaning.question)) if present]
+                                        ("domanda", meaning.question),
+                                        ("lettura completa", meaning.read_in_full or meaning.read_in_full_named))
+             if present]
     return ", ".join(parts) or "niente da custodire nelle parole"

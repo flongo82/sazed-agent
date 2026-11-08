@@ -61,7 +61,14 @@ whisper.cpp, on the processor and at low priority, and a video also gives four f
 Claude to look at. From what was read, Claude describes each item with a kind (recipe,
 article, video, note…), a title, topics and a short summary, which coppermind indexes; what
 was read is data for it, never instructions. A source that cannot be read gets 🤷 on its
-message. Next: documents and PDFs.
+message. Documents (PDF, EPUB, DOCX, ODT, plain text) are only glanced at unless you ask for
+more: their file data and first two pages give the title, the authors and, for a paper, the
+abstract; a scan shows its first page to Claude. When the first pages do not say what a published
+work is about, its card is looked up in free catalogues (Open Library, Crossref, Wikipedia), and
+Claude uses it only if it speaks of the same work; personal documents are never looked up.
+Ask to read a document in full, with it or later (replying to it, or naming it), and the whole
+text is read, summarised as a whole and searchable passage by passage; the answer comes once the
+reading is done. Next: files beyond 20 MB.
 The architecture, the reasons behind it and the protocol between the two parts are described
 in the README of `sazed-bot`.
 

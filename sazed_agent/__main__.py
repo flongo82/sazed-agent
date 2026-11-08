@@ -19,10 +19,12 @@ from urllib.parse import urlsplit
 from .claude import Claude
 from .config import ConfigError, load
 from .coppermind import Coppermind, CoppermindError
+from .documents import Documents
 from .journal import Journal
 from .lanes import Processor, lane_for
 from .link import Replaced, WorkerLink, agent_url
 from .listener import Listener
+from .lookup import Lookup
 from .reader import Reader
 from .telegram import Telegram
 from .videos import Videos
@@ -79,11 +81,12 @@ def run(config_path):
     with single_instance(config.data_dir / "agent.lock"):
         journal = Journal(config.journal_path)
         try:
-            listener = listener_for(config)
+            listener, reader = listener_for(config), Reader()
             processor = Processor(journal, Telegram(config.telegram_api_base, bot_token), config.bot_name,
                                   config.language, config.reactions, config.retry_delays,
-                                  memory=Coppermind(journal.db), claude=claude_for(config), reader=Reader(),
-                                  listener=listener, videos=Videos(listener))
+                                  memory=Coppermind(journal.db), claude=claude_for(config), reader=reader,
+                                  listener=listener, videos=Videos(listener), documents=Documents(),
+                                  lookup=Lookup(reader))
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
                               config.pong_timeout, on_recorded=processor.notify)
             asyncio.run(serve(link, processor))

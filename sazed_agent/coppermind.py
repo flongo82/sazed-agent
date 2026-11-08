@@ -13,8 +13,11 @@ lo accompagnano si aggiungono alla sua nota.
 
 La lettura di link e file è un lavoro a parte, con i suoi tentativi: ogni elemento da leggere
 ha lo stato "pending" e un istante per il prossimo tentativo (to_read, read_done, read_failed).
-Di un link o di un file la descrizione (tipo, titolo, argomenti, riassunto) nasce dal contenuto
-letto, e un nuovo salvataggio del messaggio non la tocca; di una nota nasce dalle sue parole.
+Di un link o di un file la descrizione (tipo, titolo, autori, argomenti, riassunto) nasce dal
+contenuto letto, e un nuovo salvataggio del messaggio non la tocca; di una nota nasce dalle sue
+parole. Un documento di norma si legge solo in parte (i dati del file e le prime pagine): tutto
+il testo solo se l'utente lo chiede (read_in_full), e dentro un testo lungo passages trova i
+punti che parlano di qualcosa.
 
 Ricerca: filtri esatti (tipo, piattaforma, sito, ingresso, date), che danno elenchi completi e
 il loro totale, più il testo con FTS5 (senza badare agli accenti, anche per inizio di parola).
@@ -25,11 +28,12 @@ import json
 import re
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-VERSION = 2
+VERSION = 3
 SOURCES = ("note", "link", "photo", "video", "video_note", "voice", "audio", "document")
 FILES = SOURCES[2:]
 EXTRACTIONS = ("pending", "complete", "partial", "failed", "unavailable")
@@ -46,6 +50,7 @@ CREATE TABLE IF NOT EXISTS items (
   site        TEXT,               -- l'host senza www.
   kind        TEXT,               -- ricetta, articolo, video, ...: lo assegna il modello
   title       TEXT,
+  authors     TEXT,               -- lista JSON: chi ha scritto un documento o un libro
   topics      TEXT,               -- lista JSON
   summary     TEXT,
   note        TEXT,               -- le parole dell'utente
@@ -61,7 +66,8 @@ CREATE TABLE IF NOT EXISTS items (
   updated_at  REAL    NOT NULL,
   read_attempts INTEGER NOT NULL DEFAULT 0,
   next_read_at  REAL    NOT NULL DEFAULT 0,
-  read_error    TEXT
+  read_error    TEXT,
+  read_full     INTEGER NOT NULL DEFAULT 0   -- 1: l'utente vuole che si legga tutto
 );
 CREATE UNIQUE INDEX IF NOT EXISTS items_note ON items (chat_id, message_id) WHERE origin IS NULL;
 CREATE INDEX IF NOT EXISTS items_message ON items (chat_id, message_id);
@@ -69,35 +75,41 @@ CREATE INDEX IF NOT EXISTS items_sent ON items (sent_at);
 CREATE INDEX IF NOT EXISTS items_reading ON items (extraction, next_read_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-  title, topics, summary, note, content, url,
+  title, authors, topics, summary, note, content, url,
   content='items', content_rowid='id', tokenize='unicode61 remove_diacritics 2'
 );
 CREATE TRIGGER IF NOT EXISTS items_fts_insert AFTER INSERT ON items BEGIN
-  INSERT INTO items_fts (rowid, title, topics, summary, note, content, url)
-  VALUES (new.id, new.title, new.topics, new.summary, new.note, new.content, new.url);
+  INSERT INTO items_fts (rowid, title, authors, topics, summary, note, content, url)
+  VALUES (new.id, new.title, new.authors, new.topics, new.summary, new.note, new.content, new.url);
 END;
 CREATE TRIGGER IF NOT EXISTS items_fts_delete AFTER DELETE ON items BEGIN
-  INSERT INTO items_fts (items_fts, rowid, title, topics, summary, note, content, url)
-  VALUES ('delete', old.id, old.title, old.topics, old.summary, old.note, old.content, old.url);
+  INSERT INTO items_fts (items_fts, rowid, title, authors, topics, summary, note, content, url)
+  VALUES ('delete', old.id, old.title, old.authors, old.topics, old.summary, old.note, old.content, old.url);
 END;
-CREATE TRIGGER IF NOT EXISTS items_fts_update AFTER UPDATE OF title, topics, summary, note, content, url
+CREATE TRIGGER IF NOT EXISTS items_fts_update AFTER UPDATE OF title, authors, topics, summary, note, content, url
 ON items BEGIN
-  INSERT INTO items_fts (items_fts, rowid, title, topics, summary, note, content, url)
-  VALUES ('delete', old.id, old.title, old.topics, old.summary, old.note, old.content, old.url);
-  INSERT INTO items_fts (rowid, title, topics, summary, note, content, url)
-  VALUES (new.id, new.title, new.topics, new.summary, new.note, new.content, new.url);
+  INSERT INTO items_fts (items_fts, rowid, title, authors, topics, summary, note, content, url)
+  VALUES ('delete', old.id, old.title, old.authors, old.topics, old.summary, old.note, old.content, old.url);
+  INSERT INTO items_fts (rowid, title, authors, topics, summary, note, content, url)
+  VALUES (new.id, new.title, new.authors, new.topics, new.summary, new.note, new.content, new.url);
 END;
 """
 
-# Da una versione dello schema alla successiva: ciò che manca a un database di prima.
+# Da una versione dello schema alla successiva: ciò che manca a un database di prima. Dopo una
+# migrazione l'indice del testo si ricostruisce da items (la versione 3 gli aggiunge gli autori).
 MIGRATIONS = {
     2: ("ALTER TABLE items ADD COLUMN read_attempts INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE items ADD COLUMN next_read_at REAL NOT NULL DEFAULT 0",
         "ALTER TABLE items ADD COLUMN read_error TEXT"),
+    3: ("ALTER TABLE items ADD COLUMN authors TEXT",
+        "ALTER TABLE items ADD COLUMN read_full INTEGER NOT NULL DEFAULT 0",
+        "DROP TRIGGER items_fts_insert", "DROP TRIGGER items_fts_delete", "DROP TRIGGER items_fts_update",
+        "DROP TABLE items_fts"),
 }
 
 # Peso di ogni colonna di items_fts nell'ordinamento per pertinenza (bm25).
-WEIGHTS = (4.0, 3.0, 2.0, 2.0, 1.0, 1.0)
+WEIGHTS = (4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0)
+PASSAGE = 1500   # caratteri di un passaggio di un testo lungo
 
 # Le piattaforme che si riconoscono dall'indirizzo: nome, come si scrive, domini.
 PLATFORMS = {
@@ -153,6 +165,7 @@ class Item:
     site: str
     kind: str
     title: str
+    authors: list
     topics: list
     summary: str
     note: str
@@ -166,6 +179,7 @@ class Item:
     sent_at: int
     saved_at: float
     read_error: str | None = None
+    read_full: bool = False    # l'utente ha chiesto di leggerlo tutto
 
 
 @dataclass(frozen=True)
@@ -235,6 +249,7 @@ class Coppermind:
             for statement in _statements(SCHEMA):
                 db.execute(statement)
             if version < VERSION:
+                db.execute("INSERT INTO items_fts (items_fts) VALUES ('rebuild')")
                 db.execute(f"PRAGMA user_version = {VERSION}")
 
     def save(self, chat_id, message_id, sent_at, drafts):
@@ -340,7 +355,8 @@ class Coppermind:
             f"SELECT MIN(next_read_at) FROM items WHERE extraction = 'pending'"
             f" AND source IN ({', '.join('?' * len(sources))})", sources).fetchone()[0]
 
-    def read_done(self, item_id, extraction, content=None, title=None, kind=None, topics=(), summary=None):
+    def read_done(self, item_id, extraction, content=None, title=None, kind=None, topics=(), summary=None,
+                  authors=()):
         """Annota ciò che la lettura ha trovato: il testo e la descrizione che ne nasce. Con
         "unavailable" o "failed" (una fonte che non si legge) nulla di ciò che c'era si perde."""
         if extraction not in EXTRACTIONS or extraction == "pending":
@@ -349,11 +365,52 @@ class Coppermind:
             self.db.execute(
                 "UPDATE items SET extraction = :extraction, content = COALESCE(:content, content),"
                 " title = COALESCE(:title, title), kind = COALESCE(:kind, kind),"
+                " authors = COALESCE(:authors, authors),"
                 " topics = COALESCE(:topics, topics), summary = COALESCE(:summary, summary),"
                 " read_error = NULL, updated_at = :now WHERE id = :id",
                 {"extraction": extraction, "content": content, "title": title, "kind": kind,
+                 "authors": json.dumps(list(authors), ensure_ascii=False) if authors else None,
                  "topics": json.dumps(list(topics), ensure_ascii=False) if topics else None,
                  "summary": summary, "now": self.clock(), "id": item_id})
+
+    def read_in_full(self, item_id):
+        """L'utente vuole che un documento si legga tutto: torna da leggere, con i suoi
+        tentativi da capo. Se è già letto tutto, o in lettura, nulla cambia. False se
+        l'elemento non c'è o non è un documento."""
+        with transaction(self.db):
+            row = self.db.execute("SELECT source, read_full FROM items WHERE id = ?", (item_id,)).fetchone()
+            if row is None or row["source"] != "document":
+                return False
+            if not row["read_full"]:
+                self.db.execute(
+                    "UPDATE items SET read_full = 1, extraction = 'pending', read_attempts = 0,"
+                    " next_read_at = ?, read_error = NULL, updated_at = ? WHERE id = ?",
+                    (self.clock(), self.clock(), item_id))
+        return True
+
+    def passages(self, item_id, text, limit=5):
+        """I punti del testo letto di un elemento che parlano di più delle parole date (anche
+        come inizio di parola, senza badare agli accenti), nell'ordine in cui vengono, come
+        (posizione in percentuale, passaggio). Per un testo lungo, un libro letto tutto."""
+        item = self.get(item_id)
+        terms = [t for t in re.findall(r"\w+", _plain(text or "")) if len(t) >= 3] if item and item.content else []
+        if not terms:
+            return []
+        pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, terms)) + ")")
+        chunks, start = [], 0
+        while start < len(item.content):  # passaggi di circa PASSAGE caratteri, tagliati a fine paragrafo
+            end = min(len(item.content), start + PASSAGE)
+            cut = item.content.rfind("\n", start + PASSAGE // 2, end) if end < len(item.content) else -1
+            end = cut if cut > 0 else end
+            chunks.append((start, item.content[start:end].strip()))
+            start = end
+        scored = []
+        for start, chunk in chunks:
+            found = pattern.findall(_plain(chunk))
+            if found:  # prima i passaggi con più parole diverse, poi con più occorrenze
+                scored.append((len(set(found)), len(found), start, chunk))
+        best = sorted(sorted(scored, key=lambda s: (-s[0], -s[1], s[2]))[:limit], key=lambda s: s[2])
+        return [(round(100 * start / len(item.content)), chunk) for *_, start, chunk in best]
 
     def read_failed(self, item_id, error, delays, min_delay=0, final=None):
         """Una lettura non è riuscita. Con final ("unavailable" o "failed") è l'esito definitivo;
@@ -545,12 +602,18 @@ def _item(row):
     return Item(
         id=row["id"], chat_id=row["chat_id"], message_id=row["message_id"], source=row["source"],
         url=row["url"], platform=row["platform"], site=row["site"], kind=row["kind"], title=row["title"],
+        authors=json.loads(row["authors"]) if row["authors"] else [],
         topics=json.loads(row["topics"]) if row["topics"] else [], summary=row["summary"],
         note=row["note"], content=row["content"], extraction=row["extraction"], place=row["place"],
         latitude=row["latitude"], longitude=row["longitude"], taken_at=row["taken_at"],
         media=json.loads(row["media"]) if row["media"] else {}, sent_at=row["sent_at"],
-        saved_at=row["saved_at"], read_error=row["read_error"],
+        saved_at=row["saved_at"], read_error=row["read_error"], read_full=bool(row["read_full"]),
     )
+
+
+def _plain(text):
+    """Il testo in minuscolo e senza accenti, per confrontare parole come fa la ricerca."""
+    return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if not unicodedata.combining(c))
 
 
 def _statements(script):

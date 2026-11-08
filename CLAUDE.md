@@ -28,7 +28,9 @@ con la copertina), dei file di Telegram fino a 20 MB (foto guardate da Claude; v
 video trascritti da whisper.cpp sul processore, con quattro fotogrammi per i video), video di
 YouTube con yt-dlp (descrizione, sottotitoli nella lingua originale o, se mancano, l'audio) e
 descrizione dal contenuto. Le parole dette in un vocale valgono come quelle scritte: una domanda
-fatta a voce ha la sua risposta. Prossima parte: documenti e PDF.
+fatta a voce ha la sua risposta. Documenti (PDF, EPUB, DOCX, ODT, testo) letti in parte come vuole
+R9, con le schede di Open Library, Crossref e Wikipedia per le opere pubblicate senza abstract, e
+letti tutti solo su richiesta. Prossima parte: file oltre i 20 MB (MTProto) e riproporre un file.
 
 ## Struttura
 
@@ -46,6 +48,10 @@ fatta a voce ha la sua risposta. Prossima parte: documenti e PDF.
 - `sazed_agent/listener.py`: l'ascolto dei file: ffprobe, audio a 16 kHz e fotogrammi con
   ffmpeg, trascrizione con whisper.cpp (priorità bassa, al più mezz'ora), in una cartella
   temporanea che sparisce subito dopo
+- `sazed_agent/documents.py`: i documenti: dati del file e prime pagine, o tutto il testo su
+  richiesta; PDF con poppler, EPUB, DOCX e ODT con la libreria standard e limiti sugli archivi
+- `sazed_agent/lookup.py`: le schede delle opere pubblicate da fonti libere (Open Library,
+  Crossref, Wikipedia), con uno User-Agent che dice chi chiama
 - `sazed_agent/videos.py`: i video di YouTube con yt-dlp (senza configurazione, cookie, cache
   né playlist): descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
   traduzioni), altrimenti l'audio per Whisper; gli errori non dicono quale video
@@ -63,12 +69,13 @@ fatta a voce ha la sua risposta. Prossima parte: documenti e PDF.
   finto sazed-bot e un finto Telegram, `fake_claude.py` una finta API di Claude, `test_flow.py`
   prova il giro completo, `fake_web.py` un finto web per il lettore (httpx.MockTransport),
   `fake_whisper.py` e `fake_ytdlp.py` un finto `whisper-cli` e un finto `yt-dlp` (i test di
-  `listener.py` usano il vero ffmpeg).
+  `listener.py` usano il vero ffmpeg), `files.py` costruisce PDF, EPUB, DOCX e ODT per i test
+  (quelli di `documents.py` usano il vero poppler).
   `contract.py`
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
-- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg, whisper.cpp e yt-dlp da apt), build,
+- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg, whisper.cpp, yt-dlp e poppler-utils da apt), build,
   test, setup
 - `models/`: il modello di whisper.cpp (escluso da git, montato in sola lettura), scaricato e
   verificato con la sua impronta da `scripts/setup-whisper.sh`
@@ -152,6 +159,10 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   mai il testo.
 - Il lettore apre solo host pubblici (niente rete di casa né loopback, anche dopo un rimando),
   scarica al massimo 5 MB e non scrive nulla su disco.
+- Documenti (R9): di norma solo i dati del file e le prime pagine; tutto il testo solo se
+  l'utente lo chiede (una richiesta è una domanda, che ha risposta a lettura finita). Le schede
+  in rete solo per opere pubblicate senza abstract, mai per documenti personali, e solo da fonti
+  libere e gratuite: la ricerca web di Claude è a pagamento e l'utente non la vuole.
 - Backup del database a caldo con l'API di backup di SQLite, mai copiando il file in uso.
 - Nominatim: al massimo una richiesta al secondo, con un User-Agent esplicito.
 - Il repository è pubblico: niente che permetta di raggiungere un'istanza (indirizzo del

@@ -13,6 +13,7 @@ from sazed_agent import intake
 from sazed_agent.claude import Claude, Interpretation
 from sazed_agent.config import Reactions
 from sazed_agent.coppermind import Coppermind, Draft
+from sazed_agent.documents import Documents
 from sazed_agent.journal import Journal
 from sazed_agent.lanes import Processor, lane_for
 from sazed_agent.reader import Extract, Reader, ReadError
@@ -21,6 +22,7 @@ from tests import fake_claude
 from tests.fake_claude import interpretation, tool
 from tests.fake_telegram import TOKEN, FakeTelegram, url_entities
 from tests.fake_web import FakeWeb, allow_all
+from tests.files import pdf
 
 ARTICLE = ("<title>Torta di mele</title><article><p>Tre uova, zucchero, farina e mele: la torta della domenica, "
            "soffice e profumata di cannella.</p></article>")
@@ -63,6 +65,17 @@ class FakeVideos:
         return Extract(preview.title, preview.author, self.text, True, preview.images)
 
 
+class FakeLookup:
+    """Un finto catalogo libero: annota che cosa gli si chiede e risponde con le schede date."""
+
+    def __init__(self, found=()):
+        self.found, self.asked = list(found), []
+
+    async def find(self, title, authors, kind, language):
+        self.asked.append((title, tuple(authors), kind, language))
+        return self.found
+
+
 def text_has(fragment):
     return lambda method, params: method == "sendMessage" and fragment in params.get("text", "")
 
@@ -80,7 +93,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.stop = asyncio.Event()
 
     def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0, listener=None,
-                  videos=None, listen_wait=5.0):
+                  videos=None, listen_wait=5.0, documents=None, lookup=None):
         reader = None
         if reads:
             reader = Reader(transport=self.web.transport, allow=allow_all)
@@ -88,14 +101,16 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         return Processor(self.journal, Telegram(self.telegram.api_base, token, timeout=5), "Custode", "auto",
                          Reactions("👍", "😢", "🤷"), delays, typing_interval=0.05, idle_wait=5.0,
                          config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait,
-                         listener=listener, videos=videos, listen_wait=listen_wait)
+                         listener=listener, videos=videos, listen_wait=listen_wait, documents=documents,
+                         lookup=lookup)
 
     def with_claude(self, key=fake_claude.KEY, **options):
         """Un finto Claude, e il processore che lo usa."""
         self.claude = fake_claude.FakeClaude().start()
         self.addCleanup(self.claude.stop)
-        return self.processor(claude=Claude(key, self.claude.api_base, "claude-haiku-5-5", timeout=5, max_retries=0),
-                              **options)
+        claude = Claude(key, self.claude.api_base, "claude-haiku-5-5", timeout=5, max_retries=0)
+        self.addAsyncCleanup(claude.close)  # le connessioni tenute aperte si chiudono con il test
+        return self.processor(claude=claude, **options)
 
     async def start(self, processor=None):
         processor = processor or self.processor()
@@ -345,6 +360,91 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.telegram.downloads, ["p"])  # la più grande
         [image] = fake_claude.images(self.claude.of("describe")[0])
         self.assertEqual(image["source"]["data"], "/9hmb3Rv")
+
+    # --- documenti: le prime pagine, una scheda, tutto il testo se richiesto ---
+
+    def document(self, update_id, data, name="libro.pdf", mime="application/pdf", **fields):
+        self.telegram.file(f"d{update_id}", data)
+        return update(update_id, document={"file_id": f"d{update_id}", "file_unique_id": f"D{update_id}",
+                                           "file_name": name, "mime_type": mime}, **fields)
+
+    async def test_a_document_is_glanced_at_and_described_with_its_authors(self):
+        lookup = FakeLookup()
+        p = self.with_claude(documents=Documents(), lookup=lookup)
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "article", "Notes on the Engine", ["macchine"], "Una macchina che tesse numeri.", ["Ada Lovelace"], True))
+        engine = pdf(["Notes on the Engine", "Abstract: a machine that weaves numbers", "Chapter three"],
+                     author="Ada Lovelace")
+        await self.handle(self.document(1, engine, "engine.pdf"), processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        [item] = self.items()
+        self.assertEqual((item.extraction, item.kind, item.authors, item.summary),
+                         ("partial", "article", ["Ada Lovelace"], "Una macchina che tesse numeri."))
+        self.assertIn("Abstract", item.content)
+        self.assertNotIn("Chapter three", item.content)  # solo le prime pagine
+        self.assertEqual(self.claude.messages("describe")[0]["author"], "Ada Lovelace")
+        self.assertEqual((lookup.asked, self.replies(), self.reactions()), ([], [], ["👍"]))  # c'era l'abstract
+
+    async def test_a_published_book_without_an_abstract_gets_a_card_from_a_free_catalogue(self):
+        lookup = FakeLookup([{"source": "Open Library", "title": "The Well of Ascension",
+                              "text": "Vin ed Elend governano Luthadel."}])
+        p = self.with_claude(documents=Documents(), lookup=lookup)
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "book", "Il pozzo dell'ascensione", ["fantasy"],
+            m["found_online"][0]["text"] if "found_online" in m else None, ["Brandon Sanderson"], True))
+        await self.handle(self.document(1, pdf(["IL POZZO DELL'ASCENSIONE", "Brandon Sanderson", "Prologo"])),
+                          processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        self.assertEqual(self.items()[0].summary, "Vin ed Elend governano Luthadel.")
+        self.assertEqual(lookup.asked, [("Il pozzo dell'ascensione", ("Brandon Sanderson",), "book", "it")])
+
+    async def test_a_personal_document_is_never_looked_up_online(self):
+        lookup = FakeLookup([{"source": "Wikipedia (it)", "title": "Locazione", "text": "Un contratto."}])
+        p = self.with_claude(documents=Documents(), lookup=lookup)
+        self.claude.on("describe", lambda m: fake_claude.description("document", "Contratto di locazione",
+                                                                     authors=["Ada", "Bea"], published=False))
+        await self.handle(self.document(1, pdf(["Contratto di locazione tra Ada e Bea"]), "contratto.pdf"),
+                          processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        self.assertEqual((self.items()[0].extraction, lookup.asked), ("complete", []))
+
+    async def test_a_document_is_read_in_full_when_asked_and_then_answered(self):
+        p = self.with_claude(documents=Documents())
+        self.claude.on("interpret", lambda m: interpretation(read_in_full=[m["current"]["items"][0]["id"]]))
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "book", "Mistborn", summary="Prime pagine." if m["partial"] else "Tutto il libro.", published=True))
+        self.claude.on("answer", lambda messages: "l'ho letto tutto.")
+        book = pdf(["Mistborn", "Prologo", "Capitolo tre: Vin e il Lord Reggente"])
+        replies = await self.handle(self.document(1, book, caption="leggilo tutto"), processor=p)
+        self.assertEqual(replies, ["Ciao Ada, l'ho letto tutto."])
+        [item] = self.items()
+        self.assertEqual((item.extraction, item.read_full, item.summary), ("complete", True, "Tutto il libro."))
+        self.assertIn("Capitolo tre", item.content)
+        [question] = self.claude.messages("answer")
+        self.assertEqual((question["question"], question["items"][0]["reading"]), ("leggilo tutto", "complete"))
+
+    async def test_a_document_named_in_a_later_message_is_found_and_read_in_full(self):
+        p = self.with_claude(documents=Documents())
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "book", "Il pozzo dell'ascensione", authors=["Brandon Sanderson"], published=True,
+            summary="Prime pagine." if m["partial"] else "Tutto il libro."))
+        self.claude.on("interpret", lambda m: interpretation(read_in_full_named="pozzo ascensione"))
+        self.claude.on("answer", lambda messages: "fatto.")
+        p = await self.start(p)
+        self.record(p, self.document(1, pdf(["Il pozzo", "Prologo", "Capitolo tre: il pozzo"])))
+        await self.until(lambda: self.state(1) == "done" and self.items()[0].extraction == "partial")
+        self.record(p, update(2, "leggi tutto il pozzo dell'ascensione di Sanderson"))
+        await self.until(lambda: self.state(2) == "done")
+        [item] = self.items()
+        self.assertEqual((self.replies(), item.read_full, item.extraction), (["Ciao Ada, fatto."], True, "complete"))
+        self.assertEqual(self.claude.messages("answer")[0]["items"][0]["summary"], "Tutto il libro.")
+
+    async def test_an_image_sent_as_a_file_is_looked_at_by_claude(self):
+        p = self.with_claude(documents=Documents())
+        await self.handle(self.document(1, b"\x89PNG immagine", "foto.png", "image/png"), processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        [request] = self.claude.of("describe")
+        self.assertEqual(fake_claude.images(request)[0]["source"]["media_type"], "image/png")
 
     async def test_a_file_too_big_or_gone_gets_a_shrug(self):
         p = self.with_claude(listener=FakeListener())

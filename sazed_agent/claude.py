@@ -7,8 +7,10 @@ Tre compiti, ognuno con la sua richiesta:
   di uno appena prima), una domanda o una richiesta, e su quali elementi. Link e file li
   custodisce il codice comunque; un vocale che porta solo una domanda o un commento no;
 - describe: tipo, titolo, argomenti e riassunto di un elemento, dal contenuto letto alla fonte
-  e dalle immagini viste lì (la copertina o i fotogrammi di un video, una foto);
-- answer: la risposta a una domanda, con due strumenti di sola lettura su coppermind.
+  e dalle immagini viste lì (la copertina o i fotogrammi di un video, una foto); di un documento
+  anche gli autori e se è un'opera pubblicata, e il riassunto può venire da una scheda trovata
+  in un catalogo pubblico, se parla della stessa opera;
+- answer: la risposta a una domanda, con tre strumenti di sola lettura su coppermind.
 
 Il codice salva, il modello interpreta: interpret e describe restituiscono dati strutturati che
 il codice controlla prima di usarli (elementi solo fra quelli mostrati, tipi da un elenco,
@@ -33,9 +35,12 @@ from .coppermind import FILES, SOURCES, parse_link, platform_label
 
 log = logging.getLogger("sazed_agent.claude")
 
-KINDS = ("recipe", "article", "video", "note", "photo", "document", "other")
-TITLE_MAX, TOPICS_MAX, TOPIC_MAX, SUMMARY_MAX, WORDS_MAX = 120, 8, 40, 600, 4000
+KINDS = ("recipe", "article", "book", "video", "note", "photo", "document", "other")
+TITLE_MAX, TOPICS_MAX, TOPIC_MAX, SUMMARY_MAX, WORDS_MAX = 120, 8, 40, 1000, 4000
+AUTHORS_MAX, AUTHOR_MAX = 10, 80
 CONTENT_MAX = 12_000      # caratteri del testo letto che Claude vede per descrivere
+WHOLE_MAX = 800_000       # di un documento letto tutto: un libro intero, circa 250 mila token
+WHOLE_TIMEOUT = 600.0     # secondi per descrivere un documento intero
 SPOKEN_MAX = 8_000        # delle parole dette in un vocale, per interpretarle e nel filo
 ITEM_CONTENT_MAX = 6_000  # per rispondere, di ogni elemento
 ANSWER_TURNS = 6          # giri di strumenti al massimo per una risposta
@@ -55,8 +60,8 @@ several.
 
 Return:
 - note: words to keep as a note of their own (a reminder, an idea, a list, a fact), copied \
-verbatim; null otherwise. With it, note_kind (recipe, article, video, note, photo, document, \
-other), note_title (at most 80 characters), note_topics (up to 8 short lowercase topics) and \
+verbatim; null otherwise. With it, note_kind (recipe, article, book, video, note, photo, \
+document, other), note_title (at most 80 characters), note_topics (up to 8 short lowercase topics) and \
 note_summary (one sentence, or null) to find it again.
 - comment: words that say something about items (what they are, why they matter, what to do \
 with them), copied verbatim; null otherwise. comment_on: the ids of those items, from the \
@@ -64,6 +69,11 @@ current message or, when the words follow up on an earlier message (a comment se
 a link, or a reply to it), from that message.
 - question: what the person asks or requests, in their words; null otherwise. about: the ids of \
 the items it is about, current or earlier; empty when it is about the knowledge base in general.
+- read_in_full: documents are normally read only in part (the file data and the first pages). When \
+the person asks to read one in full (all of it, the whole text), the ids of those documents, current \
+or earlier; read_in_full_named: when the document they want read in full is not among the items \
+you were given, its title or author as they named it, null otherwise. Such a request is also a \
+question: question says what they asked.
 - keep_spoken: whether the voice message itself stays in the knowledge base, as a note with its \
 transcript (so spoken words are never copied into note). true when its words hold something to \
 remember on their own (an idea, a reminder, a list, a fact); false when all they do is ask, \
@@ -84,13 +94,26 @@ mistakes, and over music or silence it can contain phrases nobody said (subtitle
 thanks for watching): ignore those. A voice message is the owner speaking to remember \
 something: it is a note.
 
+For a document (a file sent in the chat), unless partial is false only its file data and first \
+pages were read: what tells what it is, often with the abstract of a paper. found_online, when \
+there, holds descriptions found in free public catalogues (Open Library, Crossref, Wikipedia) \
+for a work with this title: use one for the summary only if it clearly speaks of this same work \
+(same title and author), never mix works.
+
 Return:
-- kind: recipe, article, video, note, photo, document or other. Prefer what it is about over \
-its form: a cooking video or reel is a recipe; video only when nothing else fits;
+- kind: recipe, article, book, video, note, photo, document or other. Prefer what it is about over \
+its form: a cooking video or reel is a recipe; video only when nothing else fits; a paper is an \
+article; a contract, a bill or a form is a document;
 - title: at most 80 characters, the content's own title when it has a good one;
 - topics: up to 8 short lowercase topics to find it again; for a recipe, its main ingredients; \
 never the name of the platform or the site;
-- summary: one or two sentences on what it is about; null if the content says too little.
+- summary: one or two sentences on what it is about; null if the content says too little (the \
+title page of a book, for example). For a document read in full (partial false), a short \
+paragraph on the whole of it;
+- authors: for a document, who wrote it, as written (at most 10); empty otherwise;
+- published: for a document, true for a published work (a book, a paper, an article, a public \
+report), false for a personal or private one (a contract, a bill, a medical report, a letter, \
+notes, a form). False for anything else.
 When partial is true, part of the source could not be read (the audio of a video, for example): \
 describe only what you see. Write title, topics and summary in the language whose ISO 639-1 \
 code is given, even when the content is in another language: translate the title if needed."""
@@ -100,7 +123,15 @@ their question or request. Use the tools to look into what they kept: search_ite
 with exact filters and words (with the total), get_item gives one item with the text read at \
 its source. The items the question is about, if any, come with the question; the recent \
 conversation helps to understand it. When the question was asked in a voice message (spoken), \
-it is an automatic transcript that can mishear words, names above all: look for what was meant.
+it is an automatic transcript that can mishear words, names above all: look for what was meant. \
+read_passages finds the passages of a long text (a document or a book read in full) that speak \
+of something.
+
+Documents are read only in part unless the person asks (reading partial: the file data and the \
+first pages, sometimes with a summary from a public catalogue): when a question needs more, say \
+they can ask you to read it all. When they asked to read a document in full, it comes with the \
+question already read, or with the reason it could not be: say so, with a few words on what it \
+says. If several documents could be the one they meant, ask which.
 
 Be brief and calm: a few sentences, or a short list. Plain text, no Markdown. When you mention \
 an item that has a link, give the link. Say how many you found when it matters, and say so when \
@@ -144,6 +175,19 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "read_passages",
+        "description": (
+            "The passages of one item's text that speak most of the given words, in order, each with "
+            "its position in the text (percent). For long texts, such as a document or a book read in full."),
+        "input_schema": {
+            "type": "object",
+            "properties": {"id": {"type": "integer"},
+                           "text": {"type": "string", "description": "the words to look for"}},
+            "required": ["id", "text"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -165,6 +209,8 @@ class Classification:
     title: str | None = None
     topics: tuple = ()
     summary: str | None = None
+    authors: tuple = ()        # di un documento
+    published: bool = False    # un'opera pubblicata, non un documento personale
 
 
 @dataclass(frozen=True)
@@ -177,6 +223,8 @@ class Interpretation:
     about: tuple = ()                   # gli elementi di cui parla
     spoken: str | None = None           # le parole dette nel vocale del messaggio, trascritte
     keep_spoken: bool = True            # False: il vocale portava solo una domanda o un commento
+    read_in_full: tuple = ()            # i documenti da leggere tutti, come chiede l'utente
+    read_in_full_named: str | None = None   # o il titolo di uno che non è fra quelli mostrati
 
     @classmethod
     def plain(cls, words, current):
@@ -193,10 +241,12 @@ class Interpretation:
     def from_dict(cls, data):
         description = data.get("description")
         return cls(data.get("note"),
-                   Classification(**dict(description, topics=tuple(description.get("topics") or ())))
+                   Classification(**dict(description, topics=tuple(description.get("topics") or ()),
+                                         authors=tuple(description.get("authors") or ())))
                    if description else None,
                    data.get("comment"), tuple(data.get("comment_on") or ()), data.get("question"),
-                   tuple(data.get("about") or ()), data.get("spoken"), data.get("keep_spoken", True))
+                   tuple(data.get("about") or ()), data.get("spoken"), data.get("keep_spoken", True),
+                   tuple(data.get("read_in_full") or ()), data.get("read_in_full_named"))
 
 
 class _Interpretation(BaseModel):
@@ -209,6 +259,8 @@ class _Interpretation(BaseModel):
     comment_on: list[int]
     question: str | None
     about: list[int]
+    read_in_full: list[int]
+    read_in_full_named: str | None
     keep_spoken: bool
 
 
@@ -219,11 +271,19 @@ class _Description(BaseModel):
     summary: str | None
 
 
+class _DocumentDescription(_Description):
+    authors: list[str]
+    published: bool
+
+
 class Claude:
     def __init__(self, api_key, api_base, model, timeout=60.0, max_retries=2):
         self.model = model
         self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=api_base, timeout=timeout,
                                                max_retries=max_retries)
+
+    async def close(self):
+        await self.client.close()
 
     async def interpret(self, conversation, words, items, language, reply_to=None, spoken=None):
         """A che cosa servono le parole del messaggio, scritte (words) e dette in un vocale
@@ -241,15 +301,25 @@ class Claude:
             return replace(Interpretation.plain(words, current), spoken=spoken)
         return _interpretation(answer, words, current, known, spoken)
 
-    async def describe(self, item, extract, language):
-        """Tipo, titolo, argomenti e riassunto di un elemento dal suo contenuto, o None."""
+    async def describe(self, item, extract, language, found=(), whole=False):
+        """Tipo, titolo, argomenti e riassunto di un elemento dal suo contenuto (di un documento
+        anche autori e se è pubblicato), o None. found: le schede trovate in rete per l'opera;
+        whole: un documento letto tutto, che Claude vede intero."""
         message = {"language": language, "source": item.source, "url": item.url,
                    "platform": platform_label(item.platform) or item.platform, "site": item.site,
                    "note": item.note, "author": extract.author, "title": extract.title,
-                   "partial": not extract.complete, "content": (extract.text or "")[:CONTENT_MAX],
+                   "partial": not extract.complete,
+                   "content": (extract.text or "")[:WHOLE_MAX if whole else CONTENT_MAX],
                    "images": len(extract.images)}
-        answer = await self._parse(DESCRIBE, message, _Description, "descrizione", extract.images)
-        return None if answer is None else _description(answer.kind, answer.title, answer.topics, answer.summary)
+        if found:
+            message["found_online"] = list(found)
+        document = item.source == "document"
+        answer = await self._parse(DESCRIBE, message, _DocumentDescription if document else _Description,
+                                   "descrizione", extract.images, WHOLE_TIMEOUT if whole else None)
+        if answer is None:
+            return None
+        return _description(answer.kind, answer.title, answer.topics, answer.summary,
+                            answer.authors if document else (), document and answer.published)
 
     async def answer(self, conversation, question, about, language, library, today, spoken=False):
         """La risposta a una domanda (spoken: fatta in un vocale), cercando in library
@@ -276,14 +346,15 @@ class Claude:
         log.warning("Claude non ha finito la risposta in %d giri", ANSWER_TURNS)
         return None
 
-    async def _parse(self, system, message, schema, what, images=()):
+    async def _parse(self, system, message, schema, what, images=(), timeout=None):
         content = json.dumps(message, ensure_ascii=False)
         if images:  # prima le immagini, poi il testo che le accompagna
             content = [*({"type": "image", "source": {"type": "base64", "media_type": kind,
                                                      "data": base64.b64encode(data).decode()}}
                          for kind, data in images), {"type": "text", "text": content}]
+        client = self.client.with_options(timeout=timeout) if timeout else self.client
         try:
-            response = await self.client.messages.parse(
+            response = await client.messages.parse(
                 model=self.model, max_tokens=4096, system=system, output_format=schema,
                 output_config={"effort": "low"}, messages=[{"role": "user", "content": content}])
         except anthropic.APIError as err:
@@ -317,8 +388,9 @@ def view(item, content_max=None):
     for key in ("kind", "title", "summary", "note", "place"):
         if getattr(item, key):
             out[key] = getattr(item, key)
-    if item.topics:
-        out["topics"] = item.topics
+    for key in ("authors", "topics"):
+        if getattr(item, key):
+            out[key] = getattr(item, key)
     out["reading"] = item.extraction
     if item.read_error and item.extraction in ("failed", "unavailable"):
         out["reading_error"] = item.read_error
@@ -333,7 +405,11 @@ def _interpretation(answer, words, current, known, spoken=None):
     comment = _text(answer.comment, WORDS_MAX)
     comment_on = tuple(dict.fromkeys(i for i in answer.comment_on if i in known))
     question = _text(answer.question, WORDS_MAX)
-    about = tuple(dict.fromkeys(i for i in answer.about if i in known))
+    read_in_full = tuple(dict.fromkeys(i for i in answer.read_in_full if i in known))
+    named = None if read_in_full else _text(answer.read_in_full_named, TITLE_MAX)
+    if (read_in_full or named) and not question:  # leggere tutto è una richiesta: a lettura finita, si risponde
+        question = _text(words or spoken, WORDS_MAX)
+    about = tuple(dict.fromkeys([*(i for i in answer.about if i in known), *read_in_full]))
     if comment and not comment_on:
         comment_on = tuple(current)
         if not comment_on:  # un commento senza elementi è una nota
@@ -351,17 +427,19 @@ def _interpretation(answer, words, current, known, spoken=None):
     if description == Classification():
         description = None
     return Interpretation(note, description, comment, comment_on if comment else (), question,
-                          about if question else (), spoken, keep_spoken)
+                          about if question else (), spoken, keep_spoken, read_in_full if question else (),
+                          named if question else None)
 
 
-def _description(kind, title, topics, summary):
+def _description(kind, title, topics, summary, authors=(), published=False):
     clean = []
     for topic in topics:
         topic = _text(topic, TOPIC_MAX)
         if topic and topic.lower() not in clean:
             clean.append(topic.lower())
+    names = tuple(dict.fromkeys(n for n in (_text(a, AUTHOR_MAX) for a in authors) if n))[:AUTHORS_MAX]
     return Classification(kind if kind in KINDS else None, _text(title, TITLE_MAX),
-                          tuple(clean[:TOPICS_MAX]), _text(summary, SUMMARY_MAX))
+                          tuple(clean[:TOPICS_MAX]), _text(summary, SUMMARY_MAX), names, bool(published))
 
 
 def _tool_result(block, library):
@@ -376,6 +454,11 @@ def _run_tool(name, args, library):
     if name == "get_item":
         item = library.get(int(args["id"]))
         return view(item, ITEM_CONTENT_MAX) if item else {"error": "no item with this id"}
+    if name == "read_passages":
+        if library.get(int(args["id"])) is None:
+            return {"error": "no item with this id"}
+        return {"passages": [{"at": f"{at}%", "text": text}
+                             for at, text in library.passages(int(args["id"]), str(args.get("text") or ""))]}
     if name != "search_items":
         raise ValueError(f"unknown tool {name}")
     for key, allowed in (("kind", KINDS), ("source", SOURCES)):

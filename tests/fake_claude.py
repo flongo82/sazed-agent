@@ -28,14 +28,16 @@ def plain(message):
 
 
 def interpretation(note=None, comment=None, comment_on=(), question=None, about=(), kind=None, title=None,
-                   topics=(), summary=None, keep_spoken=True):
+                   topics=(), summary=None, keep_spoken=True, read_in_full=(), read_in_full_named=None):
     return {"note": note, "note_kind": kind, "note_title": title, "note_topics": list(topics),
             "note_summary": summary, "comment": comment, "comment_on": list(comment_on),
-            "question": question, "about": list(about), "keep_spoken": keep_spoken}
+            "question": question, "about": list(about), "read_in_full": list(read_in_full),
+            "read_in_full_named": read_in_full_named, "keep_spoken": keep_spoken}
 
 
-def description(kind="article", title=None, topics=(), summary=None):
-    return {"kind": kind, "title": title, "topics": list(topics), "summary": summary}
+def description(kind="article", title=None, topics=(), summary=None, authors=(), published=False):
+    return {"kind": kind, "title": title, "topics": list(topics), "summary": summary, "authors": list(authors),
+            "published": published}
 
 
 def tool(name, arguments):

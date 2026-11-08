@@ -111,6 +111,18 @@ class Reader:
             return Extract(None, None, text or None, bool(text))
         raise ReadError(f"tipo di contenuto che non so leggere: {kind}", permanent=True)
 
+    async def get_json(self, url, user_agent=None):
+        """Un oggetto JSON da un servizio pubblico (le schede delle opere), o ReadError. Un
+        servizio può chiedere di presentarsi con un User-Agent che dica chi chiama (user_agent)."""
+        _, _, body = await self._get(url, headers={"user-agent": user_agent} if user_agent else None)
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise ReadError("risposta JSON non valida")
+        return data
+
     async def _oembed(self, url, endpoint, caption_is_content):
         _, _, body = await self._get(f"{endpoint}?{urlencode({'url': url, 'format': 'json'})}")
         try:
@@ -138,7 +150,7 @@ class Reader:
         kind = headers.get("content-type", "").split(";")[0].strip().lower()
         return ((kind, body),) if kind in IMAGE_TYPES and 0 < len(body) <= MAX_IMAGE else ()
 
-    async def _get(self, url, body=True):
+    async def _get(self, url, body=True, headers=None):
         """GET seguendo i rimandi, uno per uno, solo verso host pubblici."""
         for _ in range(MAX_REDIRECTS + 1):
             parts = urlsplit(url)
@@ -147,7 +159,7 @@ class Reader:
             if not await self.allow(parts.hostname):
                 raise ReadError(f"indirizzo non pubblico: {parts.hostname}", permanent=True)
             try:
-                async with self.client.stream("GET", url) as response:
+                async with self.client.stream("GET", url, headers=headers) as response:
                     if response.is_redirect and "location" in response.headers:
                         url = urljoin(url, response.headers["location"])
                         continue

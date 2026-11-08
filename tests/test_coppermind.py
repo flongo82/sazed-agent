@@ -245,6 +245,31 @@ class Reading(Base):
             self.memory.read_done(out.item.id, "pending")
 
 
+def as_version_2(db):
+    """Riporta il catalogo com'era alla versione 2: senza autori né lettura completa, con l'indice di allora."""
+    for name in ("items_fts_insert", "items_fts_delete", "items_fts_update"):
+        db.execute(f"DROP TRIGGER {name}")
+    db.execute("DROP TABLE items_fts")
+    for column in ("authors", "read_full"):
+        db.execute(f"ALTER TABLE items DROP COLUMN {column}")
+    db.execute("CREATE VIRTUAL TABLE items_fts USING fts5(title, topics, summary, note, content, url,"
+               " content='items', content_rowid='id', tokenize='unicode61 remove_diacritics 2')")
+    db.execute("CREATE TRIGGER items_fts_insert AFTER INSERT ON items BEGIN"
+               " INSERT INTO items_fts (rowid, title, topics, summary, note, content, url)"
+               " VALUES (new.id, new.title, new.topics, new.summary, new.note, new.content, new.url); END")
+    db.execute("CREATE TRIGGER items_fts_delete AFTER DELETE ON items BEGIN"
+               " INSERT INTO items_fts (items_fts, rowid, title, topics, summary, note, content, url)"
+               " VALUES ('delete', old.id, old.title, old.topics, old.summary, old.note, old.content, old.url); END")
+    db.execute("CREATE TRIGGER items_fts_update AFTER UPDATE OF title, topics, summary, note, content, url"
+               " ON items BEGIN"
+               " INSERT INTO items_fts (items_fts, rowid, title, topics, summary, note, content, url)"
+               " VALUES ('delete', old.id, old.title, old.topics, old.summary, old.note, old.content, old.url);"
+               " INSERT INTO items_fts (rowid, title, topics, summary, note, content, url)"
+               " VALUES (new.id, new.title, new.topics, new.summary, new.note, new.content, new.url); END")
+    db.execute("INSERT INTO items_fts (items_fts) VALUES ('rebuild')")
+    db.execute("PRAGMA user_version = 2")
+
+
 class Versions(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -256,7 +281,7 @@ class Versions(unittest.TestCase):
         journal.record(7, update(1), "acquisition")
         self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 0)
         Coppermind(journal.db)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertEqual(journal.get(1).state, "received")
         Coppermind(journal.db)  # una seconda apertura non cambia nulla
 
@@ -266,14 +291,29 @@ class Versions(unittest.TestCase):
         memory = Coppermind(journal.db, clock=lambda: 100.0)
         memory.save(42, 10, 1, [Draft("link", url="https://example.com/r", note="vecchio")])
         db = journal.db  # il catalogo com'era alla versione 1
+        as_version_2(db)
         db.execute("DROP INDEX items_reading")
         for column in ("read_attempts", "next_read_at", "read_error"):
             db.execute(f"ALTER TABLE items DROP COLUMN {column}")
         db.execute("PRAGMA user_version = 1")
         memory = Coppermind(db, clock=lambda: 100.0)
-        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
         item = memory.to_read(["link"])
         self.assertEqual((item.note, item.extraction, item.read_error), ("vecchio", "pending", None))
+
+    def test_a_catalogue_of_version_2_learns_about_authors(self):
+        journal = Journal(self.dir / "coppermind.db")
+        self.addCleanup(journal.close)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        [old] = [o.item for o in memory.save(42, 10, 1, [Draft("document", media={"file_unique_id": "D"})])]
+        memory.read_done(old.id, "partial", title="Il pozzo dell'ascensione")
+        as_version_2(journal.db)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(memory.search("pozzo").total, 1)  # l'indice ricostruito trova ciò che c'era
+        memory.read_done(old.id, "partial", authors=["Brandon Sanderson"])
+        self.assertEqual([i.id for i in memory.search("sanderson").items], [old.id])
+        self.assertEqual((memory.get(old.id).authors, memory.get(old.id).read_full), (["Brandon Sanderson"], False))
 
     def test_a_database_from_a_newer_version_is_refused(self):
         journal = Journal(self.dir / "coppermind.db")
@@ -281,6 +321,39 @@ class Versions(unittest.TestCase):
         journal.db.execute("PRAGMA user_version = 99")
         with self.assertRaisesRegex(CoppermindError, "versione 99"):
             Coppermind(journal.db)
+
+
+class Documents(Base):
+    def test_a_document_is_read_in_full_only_once_asked(self):
+        [doc] = [o.item for o in self.save(10, Draft("document", media={"file_unique_id": "D"}))]
+        [link] = [o.item for o in self.save(11, Draft("link", url="https://example.com/x"))]
+        self.memory.read_failed(doc.id, "rete", (1,))
+        self.memory.read_done(doc.id, "partial", content="prime pagine", title="Il pozzo", authors=["Sanderson"])
+        self.assertTrue(self.memory.read_in_full(doc.id))
+        again = self.memory.get(doc.id)
+        self.assertEqual((again.extraction, again.read_full, again.title, again.authors, again.read_error),
+                         ("pending", True, "Il pozzo", ["Sanderson"], None))  # ciò che si sapeva resta
+        self.assertEqual(self.memory.to_read(["document"]).id, doc.id)
+        self.memory.read_done(doc.id, "complete", content="tutto il libro")
+        self.assertTrue(self.memory.read_in_full(doc.id))  # già letto tutto: nulla cambia
+        self.assertEqual(self.memory.get(doc.id).extraction, "complete")
+        self.assertFalse(self.memory.read_in_full(link.id))
+        self.assertFalse(self.memory.read_in_full(999))
+
+    def test_passages_find_where_a_long_text_speaks_of_something(self):
+        [doc] = [o.item for o in self.save(10, Draft("document", media={"file_unique_id": "D"}))]
+        paragraphs = [f"Paragrafo {i}: " + "parole qualunque " * 40 for i in range(20)]
+        paragraphs[3] += "Il Lord Reggente governa l'Impero Finale."
+        paragraphs[15] += "Vin scopre l'atium e il Lord Reggente cade; l'impero trema."
+        self.memory.read_done(doc.id, "complete", content="\n".join(paragraphs))
+        found = self.memory.passages(doc.id, "lord reggente, impèro!")
+        self.assertEqual(len(found), 2)
+        self.assertLess(found[0][0], found[1][0])  # nell'ordine del testo
+        self.assertIn("Impero Finale", found[0][1])
+        self.assertIn("atium", self.memory.passages(doc.id, "atium", limit=1)[0][1])
+        self.assertTrue(all(len(text) <= 1500 for _, text in self.memory.passages(doc.id, "parole")))
+        self.assertEqual(self.memory.passages(doc.id, "di"), [])  # parole troppo corte
+        self.assertEqual(self.memory.passages(999, "lord"), [])
 
 
 class Search(Base):

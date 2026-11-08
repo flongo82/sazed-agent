@@ -62,7 +62,9 @@ class JournalTest(unittest.TestCase):
         """)
         result = subprocess.run([sys.executable, "-c", code])
         self.assertEqual(result.returncode, 9)
-        self.assertEqual(Journal(self.path).get(200).state, "received")
+        journal = Journal(self.path)
+        self.addCleanup(journal.close)
+        self.assertEqual(journal.get(200).state, "received")
 
     def test_states_only_move_forward(self):
         self.journal.record(1, update(1), "acquisition")
