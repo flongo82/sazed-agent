@@ -5,14 +5,19 @@ le domande che non aspettano dietro una lettura lunga.
 - ingresso (stati received e read): 👍 appena il messaggio arriva, poi link e file in
   coppermind (read); Claude dice a che cosa servono le parole, nel filo della conversazione:
   una nota, un commento a elementi di questo messaggio o di uno di poco prima, una domanda; il
-  codice salva note e commenti (saved). Se non c'è nulla da rispondere, il messaggio è finito;
+  codice salva note e commenti (saved). Se non c'è nulla da rispondere, il messaggio è finito.
+  Le parole dette in un vocale (o in un videomessaggio) valgono come quelle scritte: il
+  messaggio aspetta la trascrizione, al massimo listen_wait secondi, poi passa da Claude; un
+  vocale che porta solo una domanda o un commento non resta in coppermind;
 - risposte (stati saved e answered): una domanda aspetta che siano letti gli elementi di cui
   parla, al massimo read_wait secondi dal suo arrivo, poi Claude risponde cercando in
   coppermind. Da qui passano anche le risposte fisse (comando sconosciuto, messaggio che non si
   sa custodire);
-- lettura: un elemento alla volta, prima quelli che una domanda aspetta. I link si leggono
-  alla fonte, e dei video di YouTube anche descrizione e sottotitoli (o l'audio); i file si scaricano da Telegram in una cartella temporanea: le foto Claude le
-  guarda, vocali, audio e video si ascoltano (e dei video si prendono anche dei fotogrammi).
+- lettura: un elemento alla volta, prima quelli che qualcuno aspetta (un vocale da
+  interpretare, ciò di cui parla una domanda). I link si leggono alla fonte, e dei video di
+  YouTube anche descrizione e sottotitoli (o l'audio); i file si scaricano da Telegram in una
+  cartella temporanea: le foto Claude le guarda, vocali, audio e video si ascoltano (e dei video
+  si prendono anche dei fotogrammi).
   Dal contenuto Claude ricava tipo, titolo, argomenti e riassunto. Una fonte che non si legge
   mette 🤷 sul messaggio.
 
@@ -45,9 +50,11 @@ ACTIVE = ("received", "read", "saved", "answered")
 INTAKE, ANSWERS = ("received", "read"), ("saved", "answered")
 THREAD_WINDOW, THREAD_LIMIT = 3 * 3600, 10   # il filo: i messaggi delle ultime ore, fino a dieci
 READ_WAIT = 600     # quanto una domanda aspetta la lettura degli elementi di cui parla
+LISTEN_WAIT = 3600  # quanto un vocale aspetta la trascrizione, anche dietro un video lungo
 # Ciò che si sa leggere, e con che cosa: i link con il lettore, le foto con Claude (che le
 # guarda), vocali, audio e video con chi ascolta (Whisper).
 LINKS, PICTURES, RECORDINGS = ("link",), ("photo",), ("voice", "audio", "video", "video_note")
+SPOKEN = ("voice", "video_note")  # l'utente che parla, se non sono inoltrati
 
 
 def lane_for(update):
@@ -66,7 +73,8 @@ def _message(update):
 class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
                  typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None,
-                 claude=None, reader=None, read_wait=READ_WAIT, listener=None, videos=None):
+                 claude=None, reader=None, read_wait=READ_WAIT, listener=None, videos=None,
+                 listen_wait=LISTEN_WAIT):
         self.journal, self.telegram = journal, telegram
         self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
         self.claude = claude  # senza, le parole accompagnano i link o sono una nota, e nulla si descrive
@@ -78,7 +86,7 @@ class Processor:
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
         self.retry_delays, self.typing_interval, self.idle_wait = retry_delays, typing_interval, idle_wait
         self.config_pause = config_pause  # attesa dopo un token rifiutato, senza contare tentativi
-        self.clock, self.read_wait = clock, read_wait
+        self.clock, self.read_wait, self.listen_wait = clock, read_wait, listen_wait
         self.wake = {lane: asyncio.Event() for lane in ("commands", "intake", "answers", "reading")}
 
     def notify(self):
@@ -107,18 +115,21 @@ class Processor:
         return (due[0], None) if due else (None, self.journal.next_attempt("commands"))
 
     def _next_intake(self):
-        due = self.journal.due("acquisition", limit=1, states=INTAKE)
-        return (due[0], None) if due else (None, self.journal.next_attempt("acquisition", INTAKE))
+        return self._next(INTAKE, self._listening, self.listen_wait)
 
     def _next_answer(self):
-        """La prima risposta pronta; se nessuna lo è, quando guardare di nuovo: al prossimo
-        tentativo in programma o allo scadere dell'attesa di una domanda."""
+        return self._next(ANSWERS, self._waiting, self.read_wait)
+
+    def _next(self, states, waiting, wait):
+        """Il primo messaggio pronto fra quelli in questi stati; se nessuno lo è, quando guardare
+        di nuovo: al prossimo tentativo in programma o allo scadere di un'attesa (waiting dice
+        se un messaggio aspetta ancora una lettura, al massimo wait secondi dal suo arrivo)."""
         now, later = self.clock(), []
-        for entry in self.journal.pending("acquisition", ANSWERS):
+        for entry in self.journal.pending("acquisition", states):
             if entry.next_attempt_at > now:
                 later.append(entry.next_attempt_at)
-            elif self._waiting(entry):
-                later.append(entry.received_at + self.read_wait)
+            elif waiting(entry):
+                later.append(entry.received_at + wait)
             else:
                 return entry, None
         return None, min(later, default=None)
@@ -172,12 +183,20 @@ class Processor:
                 self.journal.advance(entry.update_id, "read")
             self.wake["reading"].set()
             entry = self.journal.get(entry.update_id)
+            if self._listening(entry):
+                log.info("elemento %s: le parole del vocale aspettano la trascrizione", entry.update_id)
+                return
         pairs = self._pairs(entry, reading)
+        spoken = self._spoken(entry, reading)
         meaning = Interpretation.from_dict(entry.interpretation) if entry.interpretation else None
         if meaning is None:
-            meaning = await self._interpret(entry, reading, [item for _, item in pairs])
+            heard = spoken.content if spoken is not None and spoken.extraction in ("complete", "partial") else None
+            meaning = await self._interpret(entry, reading, [item for _, item in pairs], heard)
             self.journal.set_interpretation(entry.update_id, meaning.to_dict())
         mine = {item.id for _, item in pairs}
+        forget = spoken is not None and not meaning.keep_spoken and spoken.id not in meaning.comment_on
+        if forget:  # senza l'elemento fra quelli da salvare, save lo toglie
+            pairs = [(d, item) for d, item in pairs if item.id != spoken.id]
         with self.journal.transaction():
             drafts = [dataclasses.replace(d, note=meaning.comment if item.id in meaning.comment_on else None)
                       for d, item in pairs]
@@ -189,7 +208,8 @@ class Processor:
                 if item_id not in mine:
                     self.memory.annotate(item_id, meaning.comment)
             self.journal.advance(entry.update_id, "saved")
-        log.info("elemento %s in coppermind: %d link e file, %s", entry.update_id, len(pairs), _summary(meaning))
+        log.info("elemento %s in coppermind: %d link e file, %s%s", entry.update_id, len(pairs), _summary(meaning),
+                 "; il vocale portava solo parole e non si custodisce" if forget else "")
         if self._needs_reply(reading, meaning):
             self.wake["answers"].set()
         else:
@@ -221,15 +241,15 @@ class Processor:
         return [(d, o.item) for d in self._drafts(reading, entry.links or {})
                 for o in self.memory.outcomes(entry.chat_id, entry.message_id, [d])]
 
-    async def _interpret(self, entry, reading, items):
-        """A che cosa servono le parole. Senza Claude le parole accompagnano link e file, o sono
-        una nota."""
-        if reading.command or not reading.words:
+    async def _interpret(self, entry, reading, items, spoken=None):
+        """A che cosa servono le parole, scritte e dette (spoken, la trascrizione del vocale).
+        Senza Claude le parole accompagnano link e file, o sono una nota."""
+        if reading.command or not (reading.words or spoken):
             return Interpretation()
         if self.claude is None:
             return Interpretation.plain(reading.words, [i.id for i in items])
         meaning = await self.claude.interpret(self._thread(entry, reading), reading.words, items,
-                                              self._language(entry.update), reading.reply_to)
+                                              self._language(entry.update), reading.reply_to, spoken)
         log.info("elemento %s: per Claude %s", entry.update_id, _summary(meaning))
         return meaning
 
@@ -241,6 +261,23 @@ class Processor:
 
     def _sent_at(self, entry, reading):
         return reading.sent_at if reading.sent_at is not None else int(entry.received_at)
+
+    def _spoken(self, entry, reading):
+        """Il vocale (o videomessaggio) in cui l'utente parla in questo messaggio, come elemento
+        di coppermind. None se non c'è, se è inoltrato o se c'era già da un messaggio di prima."""
+        if reading.forwarded:
+            return None
+        return next((item for d, item in self._pairs(entry, reading) if d.source in SPOKEN
+                     and (item.chat_id, item.message_id) == (entry.chat_id, entry.message_id)), None)
+
+    def _listening(self, entry):
+        """Il vocale di cui l'interpretazione aspetta ancora la trascrizione, o None. Si aspetta
+        solo se c'è Claude a interpretare, e al massimo listen_wait secondi."""
+        if (entry.state != "read" or entry.interpretation or self.claude is None
+                or self.clock() >= entry.received_at + self.listen_wait):
+            return None
+        item = self._spoken(entry, intake.read(entry.update))
+        return item if item is not None and self._unread(item.id) else None
 
     # --- il filo della conversazione ---
 
@@ -267,6 +304,9 @@ class Processor:
             out["words"] = reading.words
         if reading.command:
             out["command"] = reading.command
+        spoken = Interpretation.from_dict(e.interpretation).spoken if e.interpretation else None
+        if spoken:
+            out["spoken"] = spoken
         items = [item for _, item in self._pairs(e, reading)]
         items += [i for i in self.memory.of_message(e.chat_id, e.message_id) if i.source == "note"]
         if items:
@@ -320,7 +360,7 @@ class Processor:
         today = time.strftime("%Y-%m-%d", time.localtime(self.clock()))
         async with self._typing(entry.chat_id):
             text = await self.claude.answer(self._thread(entry, reading), meaning.question, about,
-                                            self._language(entry.update), self.memory, today)
+                                            self._language(entry.update), self.memory, today, bool(meaning.spoken))
         return text or t["no_answer"]
 
     # --- lettura ---
@@ -335,10 +375,14 @@ class Processor:
                 await self._sleep("reading", stop, self.memory.next_reading(self.readable))
 
     def _awaited(self):
-        """Gli elementi che le domande in attesa aspettano: si leggono per primi."""
+        """Gli elementi che qualcuno aspetta, da leggere per primi: i vocali di cui si attendono
+        le parole e ciò di cui parlano le domande in attesa."""
         ids = []
-        for entry in self.journal.pending("acquisition", ("saved",)):
-            if entry.interpretation:
+        for entry in self.journal.pending("acquisition", ("read", "saved")):
+            if entry.state == "read":
+                listened = self._listening(entry)
+                ids += [listened.id] if listened is not None else []
+            elif entry.interpretation:
                 meaning = Interpretation.from_dict(entry.interpretation)
                 ids += meaning.about if meaning.question else ()
         return ids
@@ -356,7 +400,7 @@ class Processor:
                         "si riproverà" if outcome == "pending" else outcome)
             if outcome != "pending":
                 await self._react(item.chat_id, item.message_id, self.reactions.unreadable)
-                self.wake["answers"].set()
+                self._read_over()
             return
         description = None
         if self.claude is not None and (extract.text or extract.title or extract.images):
@@ -378,6 +422,11 @@ class Processor:
                               topics=d.topics if d else (), summary=d and d.summary)
         log.info("elemento %s letto (%s)%s", item.id, "completo" if extract.complete else "in parte",
                  "" if d else ", senza descrizione")
+        self._read_over()
+
+    def _read_over(self):
+        """Una lettura è finita: chi la aspettava (un vocale da interpretare, una domanda) riparte."""
+        self.wake["intake"].set()
         self.wake["answers"].set()
 
     async def _read_link(self, item):

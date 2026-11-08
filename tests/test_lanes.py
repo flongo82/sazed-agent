@@ -39,13 +39,14 @@ def update(update_id, text=None, lang="it", edited=False, **fields):
 
 class FakeListener:
     """Un finto ascolto: annota i file che riceve (contenuto, se video, percorso) e ne dà una
-    trascrizione fissa, con i fotogrammi indicati."""
+    trascrizione fissa, con i fotogrammi indicati, dopo delay secondi."""
 
-    def __init__(self, text="comprare il riso", frames=()):
-        self.text, self.frames, self.heard = text, frames, []
+    def __init__(self, text="comprare il riso", frames=(), delay=0):
+        self.text, self.frames, self.delay, self.heard = text, frames, delay, []
 
     async def listen(self, path, video=False):
         self.heard.append((Path(path).read_bytes(), video, Path(path)))
+        await asyncio.sleep(self.delay)
         return Extract(None, None, self.text, True, self.frames)
 
 
@@ -79,7 +80,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.stop = asyncio.Event()
 
     def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0, listener=None,
-                  videos=None):
+                  videos=None, listen_wait=5.0):
         reader = None
         if reads:
             reader = Reader(transport=self.web.transport, allow=allow_all)
@@ -87,7 +88,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         return Processor(self.journal, Telegram(self.telegram.api_base, token, timeout=5), "Custode", "auto",
                          Reactions("👍", "😢", "🤷"), delays, typing_interval=0.05, idle_wait=5.0,
                          config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait,
-                         listener=listener, videos=videos)
+                         listener=listener, videos=videos, listen_wait=listen_wait)
 
     def with_claude(self, key=fake_claude.KEY, **options):
         """Un finto Claude, e il processore che lo usa."""
@@ -260,15 +261,69 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         listener = FakeListener("Comprare il riso e il parmigiano.")
         p = self.with_claude(listener=listener)
         self.claude.on("describe", lambda m: fake_claude.description("note", "Spesa", ["riso", "parmigiano"]))
+        self.claude.on("interpret", lambda m: interpretation(note=m["current"]["spoken"]))
         await self.handle(update(1, voice={"file_id": "v", "file_unique_id": "V", "duration": 3}), processor=p)
-        await self.until(lambda: self.items()[0].extraction == "complete")
-        item = self.items()[0]
+        [item] = self.items()  # il vocale stesso è la nota: nessuna copia delle sue parole
         self.assertEqual((item.kind, item.title, item.content), ("note", "Spesa", "Comprare il riso e il parmigiano."))
         [(data, video, path)] = listener.heard
         self.assertEqual((data, video, path.exists()), (b"OggS voce", False, False))  # la cartella non c'è più
         [message] = self.claude.messages("describe")
         self.assertEqual((message["source"], message["content"]), ("voice", "Comprare il riso e il parmigiano."))
-        self.assertEqual(self.reactions(), ["👍"])
+        [message] = self.claude.messages("interpret")  # le parole dette, appena trascritte
+        self.assertEqual((message["current"]["words"], message["current"]["spoken"]),
+                         (None, "Comprare il riso e il parmigiano."))
+        self.assertEqual((self.reactions(), self.replies()), (["👍"], []))
+
+    async def test_a_question_asked_in_a_voice_message_is_answered_and_not_kept(self):
+        self.telegram.file("v", b"OggS domanda")
+        p = self.with_claude(listener=FakeListener("Che ricette di carbonara ho?"))
+        self.claude.on("interpret", lambda m: interpretation(
+            question=m["current"].get("spoken") or m["current"]["words"], keep_spoken=False))
+        self.claude.on("answer", lambda messages: "ne hai una.")
+        replies = await self.handle(update(1, voice={"file_id": "v", "file_unique_id": "V", "duration": 2}),
+                                    update(2, "e con la panna?"), processor=p)
+        self.assertEqual(replies, ["Ciao Ada, ne hai una."] * 2)
+        first, second = self.claude.messages("answer")
+        self.assertEqual((first["question"], first["spoken"]), ("Che ricette di carbonara ho?", True))
+        self.assertEqual(second["conversation"], [{"message": 10, "minutes_ago": 0,  # il filo ricorda le parole
+                                                   "spoken": "Che ricette di carbonara ho?", "sazed": "ne hai una."}])
+        self.assertEqual(self.memory.count(), 0)  # una domanda non si custodisce, detta o scritta
+        self.assertEqual(self.reactions(10), ["👍"])
+
+    async def test_a_comment_spoken_right_after_a_link_joins_it(self):
+        self.telegram.file("v", b"OggS commento")
+        p = self.with_claude(listener=FakeListener("Questa la facciamo sabato."))
+        self.claude.on("interpret", lambda m: interpretation(
+            comment=m["current"]["spoken"], comment_on=[m["conversation"][-1]["items"][0]["id"]], keep_spoken=False))
+        replies = await self.handle(update(1, "https://example.com/torta"),
+                                    update(2, voice={"file_id": "v", "file_unique_id": "V"}), processor=p)
+        [link] = self.items()
+        self.assertEqual((replies, link.url, link.note), ([], "https://example.com/torta", "Questa la facciamo sabato."))
+
+    async def test_a_forwarded_voice_message_is_content_not_words(self):
+        self.telegram.file("v", b"OggS altrui")
+        p = self.with_claude(listener=FakeListener("Mi mandi la ricetta?"))
+        origin = {"type": "hidden_user", "date": 1_790_000_000, "sender_user_name": "Bea"}
+        await self.handle(update(1, voice={"file_id": "v", "file_unique_id": "V"}, forward_origin=origin), processor=p)
+        await self.until(lambda: self.items()[0].extraction == "complete")
+        self.assertEqual((self.replies(), self.claude.of("interpret")), ([], []))
+
+    async def test_the_words_of_a_voice_message_do_not_wait_forever(self):
+        self.telegram.file("v", b"OggS lungo")
+        p = self.with_claude(listener=FakeListener(delay=1.0), listen_wait=0.2)
+        await self.handle(update(1, voice={"file_id": "v", "file_unique_id": "V"}), processor=p)
+        self.assertEqual(self.items()[0].extraction, "pending")  # ancora in ascolto
+        await self.until(lambda: self.items()[0].extraction == "complete", timeout=3)
+        self.assertEqual(self.claude.of("interpret"), [])  # resta un vocale, come una nota
+
+    async def test_a_voice_message_waiting_for_its_words_is_listened_to_first(self):
+        p = self.with_claude(reads=True, listener=FakeListener())
+        self.memory.save(42, 10, 0, [Draft("link", url="https://example.com/prima")])
+        voice = update(2, voice={"file_id": "v", "file_unique_id": "V"})
+        self.journal.record(2, voice, "acquisition")
+        self.journal.advance(2, "read")
+        self.memory.save(42, 20, 0, [Draft("voice", media={"file_id": "v", "file_unique_id": "V"})])
+        self.assertEqual(self.memory.to_read(p.readable, first=p._awaited()).source, "voice")
 
     async def test_a_video_is_heard_and_seen(self):
         self.telegram.file("m", b"mp4")
@@ -537,8 +592,8 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         p = await self.start()
         self.record(p, update(1, "/aiuto"))
         self.record(p, update(2, "/aiuto"))
-        await self.until(lambda: self.state(1) == "failed" and self.state(2) == "done")
-        self.assertEqual(self.journal.get(1).attempts, 3)  # due attese configurate, tre tentativi
+        await self.until(lambda: self.state(2) == "done" and len(self.reactions(10)) == 2)  # avviso, poi 😢
+        self.assertEqual((self.state(1), self.journal.get(1).attempts), ("failed", 3))  # due attese configurate, tre tentativi
         notices = [text for text in self.replies() if "riuscito" in text]
         self.assertEqual(notices, ["Ciao Ada, non sono riuscito a elaborare questo messaggio dopo 3 tentativi: "
                                    "lo tengo da parte."])

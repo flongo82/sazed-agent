@@ -4,7 +4,9 @@ Ogni link è un elemento, e un file (foto, video, vocale, audio, documento) è u
 rimanda al messaggio, con i link della didascalia accanto: questi si custodiscono sempre. Le
 parole (il testo senza i link, o la didascalia) restano a parte: a che cosa servono, se sono
 una nota, un commento o una domanda, lo dice Claude, o in sua assenza il codice. reply_to è il
-messaggio a cui l'utente ha risposto. Un comando che l'agente non conosce non si salva.
+messaggio a cui l'utente ha risposto; forwarded dice che il messaggio è inoltrato, quindi parole
+d'altri (un vocale inoltrato è un contenuto, non l'utente che parla). Un comando che l'agente
+non conosce non si salva.
 """
 
 import re
@@ -26,6 +28,7 @@ class Reading:
     sent_at: int | None    # quando l'utente l'ha mandato (date di Telegram)
     edited: bool           # una modifica di un messaggio già mandato
     reply_to: int | None = None   # il message_id del messaggio a cui risponde
+    forwarded: bool = False       # inoltrato da un'altra chat o persona
 
 
 def read(update):
@@ -33,13 +36,15 @@ def read(update):
     msg = update.get("edited_message" if edited else "message") or {}
     sent_at = msg.get("date")
     reply_to = (msg.get("reply_to_message") or {}).get("message_id")
+    forwarded = bool(msg.get("forward_origin") or msg.get("forward_date"))  # forward_date: API prima della 7.0
     text = msg.get("text")
     if text is not None:
         first = text.split(maxsplit=1)[0] if text.strip() else ""
         if COMMAND.fullmatch(first):
-            return Reading((), None, first.split("@")[0], sent_at, edited, reply_to)
+            return Reading((), None, first.split("@")[0], sent_at, edited, reply_to, forwarded)
         words, links = _split(text, msg.get("entities"))
-        return Reading(tuple(Draft("link", url=url) for url in links), words, None, sent_at, edited, reply_to)
+        return Reading(tuple(Draft("link", url=url) for url in links), words, None, sent_at, edited, reply_to,
+                       forwarded)
     for source in FILES:
         if msg.get(source):
             words, links = _split(msg.get("caption") or "", msg.get("caption_entities"))
@@ -47,8 +52,8 @@ def read(update):
             media = {k: file[k] for k in MEDIA_FIELDS if file.get(k) is not None}
             title = (file.get("title") or file.get("file_name")) if source in ("audio", "document") else None
             drafts = [Draft(source, title=title, media=media)] + [Draft("link", url=url) for url in links]
-            return Reading(tuple(drafts), words, None, sent_at, edited, reply_to)
-    return Reading((), None, None, sent_at, edited, reply_to)
+            return Reading(tuple(drafts), words, None, sent_at, edited, reply_to, forwarded)
+    return Reading((), None, None, sent_at, edited, reply_to, forwarded)
 
 
 def _split(text, entities):

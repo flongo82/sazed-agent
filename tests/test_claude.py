@@ -76,6 +76,39 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         self.fake.on("interpret", lambda m: interpretation())
         self.assertEqual(await self.interpret("ok grazie", items=[]), Interpretation())  # solo un saluto
 
+    async def test_spoken_words_are_interpreted_like_typed_ones(self):
+        voice = self.voice()
+        self.fake.on("interpret", lambda m: interpretation(question="che ricette di carbonara ho?", keep_spoken=False))
+        meaning = await self.claude.interpret(self.earlier, None, [voice], "it", spoken="Che ricette di carbonara ho?")
+        self.assertEqual((meaning.question, meaning.spoken, meaning.keep_spoken),
+                         ("che ricette di carbonara ho?", "Che ricette di carbonara ho?", False))
+        [message] = self.fake.messages("interpret")
+        self.assertEqual((message["current"]["words"], message["current"]["spoken"]),
+                         (None, "Che ricette di carbonara ho?"))
+        self.assertIn("spoken words are never copied into note", self.fake.of("interpret")[0]["body"]["system"])
+
+    async def test_a_voice_message_is_let_go_only_when_a_question_or_a_comment_holds_its_words(self):
+        voice = self.voice()
+
+        async def interpret(answer, words=None):
+            self.fake.on("interpret", lambda m: answer)
+            return await self.claude.interpret([], words, [voice], "it", spoken="comprare il riso")
+        meaning = await interpret(interpretation(note="comprare il riso", keep_spoken=False))
+        self.assertEqual((meaning.note, meaning.keep_spoken), (None, True))  # la nota è il vocale stesso
+        self.assertTrue((await interpret(interpretation(keep_spoken=False))).keep_spoken)  # niente che le tenga
+        meaning = await interpret(interpretation(note="spesa", question="quanto riso?", keep_spoken=False),
+                                  words="spesa")
+        self.assertEqual((meaning.note, meaning.question, meaning.keep_spoken), ("spesa", "quanto riso?", False))
+        self.fake.stop_with("refusal")
+        with self.assertLogs("sazed_agent.claude", "WARNING"):
+            meaning = await self.claude.interpret([], None, [voice], "it", spoken="parola " * 2000)
+        self.assertEqual(meaning, Interpretation(spoken=("parola " * 2000)[:8000]))  # resta, con le sue parole
+
+    def voice(self):
+        [voice] = [o.item for o in self.memory.save(42, 11, 1_790_000_000, [
+            Draft("voice", media={"file_id": "v", "file_unique_id": "V", "duration": 4})])]
+        return voice
+
     async def test_a_refusal_or_an_unusable_answer_falls_back_on_the_code(self):
         self.fake.stop_with("refusal")
         with self.assertLogs("sazed_agent.claude", "WARNING"):
@@ -135,6 +168,11 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("guanciale, uova, pecorino", results[4]["content"][0]["content"])
         self.assertEqual({t["name"] for t in requests[0]["body"]["tools"]}, {"search_items", "get_item"})
 
+    async def test_a_spoken_question_is_answered_knowing_it_was_heard(self):
+        await self.claude.answer([], "che ricette di carbonara ho?", [], "it", self.memory, "2026-11-08", spoken=True)
+        self.assertTrue(self.fake.messages("answer")[0]["spoken"])
+        self.assertIn("names above all", self.fake.of("answer")[0]["body"]["system"])
+
     async def test_a_wrong_tool_input_is_an_error_for_claude_not_for_the_agent(self):
         turns = iter([tool("search_items", {"kind": "romanzo"}), tool("get_item", {"id": 999}), "niente."])
         self.fake.on("answer", lambda messages: next(turns))
@@ -182,7 +220,7 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
 
     def test_an_interpretation_survives_the_journal(self):
         meaning = Interpretation("riso", Classification("note", "Spesa", ("riso",), None), "buona", (3,),
-                                 "quando?", (3, 4))
+                                 "quando?", (3, 4), "quando lo cucino?", False)
         self.assertEqual(Interpretation.from_dict(meaning.to_dict()), meaning)
         self.assertEqual(Interpretation.from_dict({"intent": "save", "items": []}), Interpretation())  # di prima
 

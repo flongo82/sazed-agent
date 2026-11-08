@@ -28,10 +28,10 @@ def plain(message):
 
 
 def interpretation(note=None, comment=None, comment_on=(), question=None, about=(), kind=None, title=None,
-                   topics=(), summary=None):
+                   topics=(), summary=None, keep_spoken=True):
     return {"note": note, "note_kind": kind, "note_title": title, "note_topics": list(topics),
             "note_summary": summary, "comment": comment, "comment_on": list(comment_on),
-            "question": question, "about": list(about)}
+            "question": question, "about": list(about), "keep_spoken": keep_spoken}
 
 
 def description(kind="article", title=None, topics=(), summary=None):

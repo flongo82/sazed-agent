@@ -85,6 +85,13 @@ class Files(unittest.TestCase):
         voice = read(update(voice={"file_id": "v", "file_unique_id": "V", "duration": 12}))
         self.assertEqual((voice.drafts[0].source, voice.drafts[0].title), ("voice", None))
 
+    def test_a_forwarded_message_is_marked(self):
+        voice = {"file_id": "v", "file_unique_id": "V", "duration": 12}
+        self.assertFalse(read(update(voice=voice)).forwarded)
+        origin = {"type": "user", "date": 1_789_999_000, "sender_user": {"id": 7, "first_name": "Bea"}}
+        self.assertTrue(read(update(voice=voice, forward_origin=origin)).forwarded)
+        self.assertTrue(read(text("ciao", forward_date=1_789_999_000)).forwarded)  # come prima dell'API 7.0
+
     def test_a_message_with_nothing_to_keep(self):
         reading = read(update(sticker={"file_id": "x", "file_unique_id": "X", "emoji": "👍"}))
         self.assertEqual((reading.drafts, reading.words, reading.command), ((), None, None))

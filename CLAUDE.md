@@ -27,7 +27,8 @@ dopo la lettura degli elementi di cui parlano. Passo 4.3 in parte: corsia di let
 con la copertina), dei file di Telegram fino a 20 MB (foto guardate da Claude; vocali, audio e
 video trascritti da whisper.cpp sul processore, con quattro fotogrammi per i video), video di
 YouTube con yt-dlp (descrizione, sottotitoli nella lingua originale o, se mancano, l'audio) e
-descrizione dal contenuto. Prossima parte: documenti e PDF.
+descrizione dal contenuto. Le parole dette in un vocale valgono come quelle scritte: una domanda
+fatta a voce ha la sua risposta. Prossima parte: documenti e PDF.
 
 ## Struttura
 
@@ -121,6 +122,12 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
 - Il filo: Claude vede i messaggi delle ultime ore (al massimo dieci), con elementi e risposte
   di sazed, più quello a cui l'utente ha risposto. Così un commento o una domanda mandati
   subito dopo un link si legano a quel link.
+- Le parole dette in un vocale o in un videomessaggio (non inoltrati) sono parole dell'utente:
+  l'ingresso aspetta la trascrizione (al massimo `LISTEN_WAIT`, e la lettura le dà la
+  precedenza), poi Claude le interpreta come quelle scritte. Il vocale resta come nota, senza
+  copie delle sue parole; si toglie da coppermind solo se Claude vi trova una domanda o un
+  commento e dice che non c'è altro da tenere. Le parole dette restano nell'interpretazione
+  annotata nel registro, per il filo.
 - Le risposte vanno sempre in risposta al messaggio originale, con "sta scrivendo..."
   (`sendChatAction`) mentre Claude risponde.
 - Ogni estrazione registra il suo esito (completa, parziale, fallita). Una fonte non più

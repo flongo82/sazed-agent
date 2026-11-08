@@ -2,9 +2,10 @@
 
 Tre compiti, ognuno con la sua richiesta:
 
-- interpret: a che cosa servono le parole di un messaggio, nel filo della conversazione: una
-  nota da custodire, un commento a elementi (di questo messaggio o di uno appena prima), una
-  domanda o una richiesta, e su quali elementi. Link e file li custodisce il codice comunque;
+- interpret: a che cosa servono le parole di un messaggio, scritte o dette in un vocale, nel
+  filo della conversazione: una nota da custodire, un commento a elementi (di questo messaggio o
+  di uno appena prima), una domanda o una richiesta, e su quali elementi. Link e file li
+  custodisce il codice comunque; un vocale che porta solo una domanda o un commento no;
 - describe: tipo, titolo, argomenti e riassunto di un elemento, dal contenuto letto alla fonte
   e dalle immagini viste lì (la copertina o i fotogrammi di un video, una foto);
 - answer: la risposta a una domanda, con due strumenti di sola lettura su coppermind.
@@ -22,7 +23,7 @@ import base64
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Literal
 
 import anthropic
@@ -35,6 +36,7 @@ log = logging.getLogger("sazed_agent.claude")
 KINDS = ("recipe", "article", "video", "note", "photo", "document", "other")
 TITLE_MAX, TOPICS_MAX, TOPIC_MAX, SUMMARY_MAX, WORDS_MAX = 120, 8, 40, 600, 4000
 CONTENT_MAX = 12_000      # caratteri del testo letto che Claude vede per descrivere
+SPOKEN_MAX = 8_000        # delle parole dette in un vocale, per interpretarle e nel filo
 ITEM_CONTENT_MAX = 6_000  # per rispondere, di ogni elemento
 ANSWER_TURNS = 6          # giri di strumenti al massimo per una risposta
 SEARCH_MAX = 20
@@ -46,7 +48,10 @@ are always kept by the code: you only decide what the person's words are for.
 
 You get the recent conversation, oldest first (each message with its words, the items it \
 brought, and sazed's reply if any), then the current message with its words and items. \
-reply_to is the message the person replied to, when they did.
+reply_to is the message the person replied to, when they did. A message can also have spoken \
+words: the automatic transcript of a voice message the person recorded, which can have mistakes. \
+They are the person's words like the typed ones, and can hold a note, a comment, a question, or \
+several.
 
 Return:
 - note: words to keep as a note of their own (a reminder, an idea, a list, a fact), copied \
@@ -59,6 +64,11 @@ current message or, when the words follow up on an earlier message (a comment se
 a link, or a reply to it), from that message.
 - question: what the person asks or requests, in their words; null otherwise. about: the ids of \
 the items it is about, current or earlier; empty when it is about the knowledge base in general.
+- keep_spoken: whether the voice message itself stays in the knowledge base, as a note with its \
+transcript (so spoken words are never copied into note). true when its words hold something to \
+remember on their own (an idea, a reminder, a list, a fact); false when all they do is ask, \
+comment on items (the comment is kept with those items) or acknowledge. True only when unsure, \
+and when there are no spoken words.
 A message can be several of these at once, in separate parts. Words that only acknowledge \
 ("ok", "thanks") are none of them. When in doubt between a note and nothing, it is a note. Use \
 only item ids you were given. Write note_title, note_topics, note_summary and question in the \
@@ -89,7 +99,8 @@ ANSWER = """You are sazed, the keeper of one person's knowledge base on Telegram
 their question or request. Use the tools to look into what they kept: search_items lists items \
 with exact filters and words (with the total), get_item gives one item with the text read at \
 its source. The items the question is about, if any, come with the question; the recent \
-conversation helps to understand it.
+conversation helps to understand it. When the question was asked in a voice message (spoken), \
+it is an automatic transcript that can mishear words, names above all: look for what was meant.
 
 Be brief and calm: a few sentences, or a short list. Plain text, no Markdown. When you mention \
 an item that has a link, give the link. Say how many you found when it matters, and say so when \
@@ -164,6 +175,8 @@ class Interpretation:
     comment_on: tuple = ()
     question: str | None = None         # domanda o richiesta, da rispondere
     about: tuple = ()                   # gli elementi di cui parla
+    spoken: str | None = None           # le parole dette nel vocale del messaggio, trascritte
+    keep_spoken: bool = True            # False: il vocale portava solo una domanda o un commento
 
     @classmethod
     def plain(cls, words, current):
@@ -183,7 +196,7 @@ class Interpretation:
                    Classification(**dict(description, topics=tuple(description.get("topics") or ())))
                    if description else None,
                    data.get("comment"), tuple(data.get("comment_on") or ()), data.get("question"),
-                   tuple(data.get("about") or ()))
+                   tuple(data.get("about") or ()), data.get("spoken"), data.get("keep_spoken", True))
 
 
 class _Interpretation(BaseModel):
@@ -196,6 +209,7 @@ class _Interpretation(BaseModel):
     comment_on: list[int]
     question: str | None
     about: list[int]
+    keep_spoken: bool
 
 
 class _Description(BaseModel):
@@ -211,17 +225,21 @@ class Claude:
         self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=api_base, timeout=timeout,
                                                max_retries=max_retries)
 
-    async def interpret(self, conversation, words, items, language, reply_to=None):
-        """A che cosa servono le parole del messaggio. conversation: i messaggi di prima, già
-        come dizionari (thread_message); items: gli elementi di questo messaggio (Item)."""
+    async def interpret(self, conversation, words, items, language, reply_to=None, spoken=None):
+        """A che cosa servono le parole del messaggio, scritte (words) e dette in un vocale
+        (spoken, la trascrizione). conversation: i messaggi di prima, già come dizionari
+        (thread_message); items: gli elementi di questo messaggio (Item)."""
         current = [i.id for i in items]
         known = set(current) | {i["id"] for m in conversation for i in m.get("items", ())}
+        spoken = spoken[:SPOKEN_MAX] if spoken else None
         message = {"language": language, "conversation": conversation,
                    "current": {"words": words, "items": [view(i) for i in items], "reply_to": reply_to}}
+        if spoken:
+            message["current"]["spoken"] = spoken
         answer = await self._parse(INTERPRET, message, _Interpretation, "interpretazione")
-        if answer is None:
-            return Interpretation.plain(words, current)
-        return _interpretation(answer, words, current, known)
+        if answer is None:  # il vocale resta, come le parole: nulla si perde
+            return replace(Interpretation.plain(words, current), spoken=spoken)
+        return _interpretation(answer, words, current, known, spoken)
 
     async def describe(self, item, extract, language):
         """Tipo, titolo, argomenti e riassunto di un elemento dal suo contenuto, o None."""
@@ -233,12 +251,14 @@ class Claude:
         answer = await self._parse(DESCRIBE, message, _Description, "descrizione", extract.images)
         return None if answer is None else _description(answer.kind, answer.title, answer.topics, answer.summary)
 
-    async def answer(self, conversation, question, about, language, library, today):
-        """La risposta a una domanda, cercando in library (coppermind). None se Claude non ne
-        dà una utilizzabile."""
+    async def answer(self, conversation, question, about, language, library, today, spoken=False):
+        """La risposta a una domanda (spoken: fatta in un vocale), cercando in library
+        (coppermind). None se Claude non ne dà una utilizzabile."""
         prompt = {"language": language, "today": today, "conversation": conversation,
                   "question": question, "items": [view(i, ITEM_CONTENT_MAX) for i in about],
                   "items_kept": library.count()}
+        if spoken:
+            prompt["spoken"] = True
         messages = [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]
         for _ in range(ANSWER_TURNS):
             response = await self._create(system=ANSWER, tools=TOOLS, messages=messages, max_tokens=8192,
@@ -308,7 +328,7 @@ def view(item, content_max=None):
     return out
 
 
-def _interpretation(answer, words, current, known):
+def _interpretation(answer, words, current, known, spoken=None):
     note = _text(answer.note, WORDS_MAX)
     comment = _text(answer.comment, WORDS_MAX)
     comment_on = tuple(dict.fromkeys(i for i in answer.comment_on if i in known))
@@ -320,12 +340,18 @@ def _interpretation(answer, words, current, known):
             note, comment = note or comment, None
     if current and not (note or comment or question) and words:
         comment, comment_on = words, tuple(current)  # le parole che accompagnano un link restano
+    keep_spoken = True
+    if spoken:
+        if note and not words:  # una nota dalle parole dette: la custodisce il vocale stesso
+            note = None
+        elif not answer.keep_spoken and (comment or question):
+            keep_spoken = False  # senza una domanda o un commento che ne tengano le parole, resta
     description = _description(answer.note_kind, answer.note_title, answer.note_topics,
                                answer.note_summary) if note else None
     if description == Classification():
         description = None
     return Interpretation(note, description, comment, comment_on if comment else (), question,
-                          about if question else ())
+                          about if question else (), spoken, keep_spoken)
 
 
 def _description(kind, title, topics, summary):

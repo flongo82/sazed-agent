@@ -43,7 +43,10 @@ a request. The code keeps notes and comments; links and files are kept in any ca
 Claude is asked. Questions get an answer in the chat: Claude looks into coppermind with two
 read-only tools (search with exact filters and words, and one item with the text read at its
 source). A question about a link waits until that link has been read, for a few minutes at
-most.
+most. Words spoken in a voice message (or a round video message) count like typed ones: once
+transcribed, they go through the same reading, so a question asked aloud gets its answer, and a
+voice message that only asks or comments is not kept. A forwarded voice message is content,
+not your words.
 
 Links and files are read in a lane of their own, one at a time, so that nothing else waits
 for them. Pages give their title, description, structured data (recipes with ingredients and
