@@ -11,7 +11,7 @@ le domande che non aspettano dietro una lettura lunga.
   coppermind. Da qui passano anche le risposte fisse (comando sconosciuto, messaggio che non si
   sa custodire);
 - lettura: un elemento alla volta, prima quelli che una domanda aspetta. I link si leggono
-  alla fonte; i file si scaricano da Telegram in una cartella temporanea: le foto Claude le
+  alla fonte, e dei video di YouTube anche descrizione e sottotitoli (o l'audio); i file si scaricano da Telegram in una cartella temporanea: le foto Claude le
   guarda, vocali, audio e video si ascoltano (e dei video si prendono anche dei fotogrammi).
   Dal contenuto Claude ricava tipo, titolo, argomenti e riassunto. Una fonte che non si legge
   mette 🤷 sul messaggio.
@@ -33,10 +33,11 @@ from pathlib import Path
 
 from . import intake
 from .claude import ClaudeError, Interpretation, view
-from .coppermind import Coppermind, Draft, unique
+from .coppermind import Coppermind, Draft, parse_link, unique
 from .messages import STATUS_COMMANDS, language_for, messages_for
 from .reader import Extract, ReadError
 from .telegram import FILE_MAX, TelegramError
+from .videos import PLATFORMS as VIDEO_PLATFORMS
 
 log = logging.getLogger("sazed_agent.lanes")
 
@@ -65,12 +66,13 @@ def _message(update):
 class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
                  typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None,
-                 claude=None, reader=None, read_wait=READ_WAIT, listener=None):
+                 claude=None, reader=None, read_wait=READ_WAIT, listener=None, videos=None):
         self.journal, self.telegram = journal, telegram
         self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
         self.claude = claude  # senza, le parole accompagnano i link o sono una nota, e nulla si descrive
         self.reader = reader  # senza, i link non si leggono
         self.listener = listener  # senza, vocali, audio e video non si ascoltano
+        self.videos = videos  # senza, dei video di YouTube resta l'anteprima
         self.readable = ((LINKS if reader is not None else ()) + (PICTURES if claude is not None else ())
                          + (RECORDINGS if listener is not None else ()))
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
@@ -382,7 +384,13 @@ class Processor:
         resolved = await self.reader.resolve(item.url)  # un link breve rimasto tale all'ingresso
         if resolved != item.url and self.memory.relink(item.id, resolved):
             log.info("elemento %s: link breve portato al suo indirizzo", item.id)
-        return await self.reader.read(resolved)
+        extract = await self.reader.read(resolved)
+        if self.videos is not None and parse_link(resolved).platform in VIDEO_PLATFORMS:
+            try:
+                extract = await self.videos.read(resolved, extract)
+            except ReadError as err:  # YouTube che blocca, yt-dlp vecchio: riprovare subito non aiuta
+                log.warning("elemento %s: del video resta l'anteprima (%s)", item.id, err)
+        return extract
 
     async def _read_file(self, item):
         """Scarica il file da Telegram in una cartella temporanea e lo legge: una foto la

@@ -25,8 +25,9 @@ del messaggio prima, domanda); le domande hanno risposta con due strumenti di so
 dopo la lettura degli elementi di cui parlano. Passo 4.3 in parte: corsia di lettura dei link
 (link brevi, pagine con dati strutturati, anteprime pubbliche di Instagram, TikTok e YouTube
 con la copertina), dei file di Telegram fino a 20 MB (foto guardate da Claude; vocali, audio e
-video trascritti da whisper.cpp sul processore, con quattro fotogrammi per i video) e
-descrizione dal contenuto. Prossima parte: sottotitoli e audio di YouTube con yt-dlp.
+video trascritti da whisper.cpp sul processore, con quattro fotogrammi per i video), video di
+YouTube con yt-dlp (descrizione, sottotitoli nella lingua originale o, se mancano, l'audio) e
+descrizione dal contenuto. Prossima parte: documenti e PDF.
 
 ## Struttura
 
@@ -44,6 +45,9 @@ descrizione dal contenuto. Prossima parte: sottotitoli e audio di YouTube con yt
 - `sazed_agent/listener.py`: l'ascolto dei file: ffprobe, audio a 16 kHz e fotogrammi con
   ffmpeg, trascrizione con whisper.cpp (priorità bassa, al più mezz'ora), in una cartella
   temporanea che sparisce subito dopo
+- `sazed_agent/videos.py`: i video di YouTube con yt-dlp (senza configurazione, cookie, cache
+  né playlist): descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
+  traduzioni), altrimenti l'audio per Whisper; gli errori non dicono quale video
 - `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale): interpret (a che cosa servono le
   parole, nel filo), describe (dal contenuto letto), answer (strumenti di sola lettura su
   coppermind); risposte strutturate controllate prima dell'uso; errori come quelli di Telegram
@@ -57,13 +61,14 @@ descrizione dal contenuto. Prossima parte: sottotitoli e audio di YouTube con yt
 - `tests/`: test con `unittest`, senza rete; `fake_worker.py` e `fake_telegram.py` sono un
   finto sazed-bot e un finto Telegram, `fake_claude.py` una finta API di Claude, `test_flow.py`
   prova il giro completo, `fake_web.py` un finto web per il lettore (httpx.MockTransport),
-  `fake_whisper.py` un finto `whisper-cli` (i test di `listener.py` usano il vero ffmpeg).
+  `fake_whisper.py` e `fake_ytdlp.py` un finto `whisper-cli` e un finto `yt-dlp` (i test di
+  `listener.py` usano il vero ffmpeg).
   `contract.py`
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
-- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg e whisper.cpp da apt), build, test,
-  setup
+- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg, whisper.cpp e yt-dlp da apt), build,
+  test, setup
 - `models/`: il modello di whisper.cpp (escluso da git, montato in sola lettura), scaricato e
   verificato con la sua impronta da `scripts/setup-whisper.sh`
 - `pip-requirements.txt`: ciò che apt non ha, con versione e hash (oggi solo `jiter`, che

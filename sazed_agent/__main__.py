@@ -3,7 +3,8 @@
 - check: verifica configurazione, segreti, registro e coppermind senza collegarsi a nulla;
 - run: si collega al Worker, registra e conferma i messaggi, e li elabora nelle corsie:
   note, link e file finiscono in coppermind, link e file si leggono (vocali e video si
-  ascoltano, se c'è il modello di Whisper), le domande hanno risposta.
+  ascoltano, se c'è il modello di Whisper; di YouTube anche sottotitoli e descrizione), le
+  domande hanno risposta.
 """
 
 import argparse
@@ -24,6 +25,7 @@ from .link import Replaced, WorkerLink, agent_url
 from .listener import Listener
 from .reader import Reader
 from .telegram import Telegram
+from .videos import Videos
 
 log = logging.getLogger("sazed_agent")
 
@@ -77,10 +79,11 @@ def run(config_path):
     with single_instance(config.data_dir / "agent.lock"):
         journal = Journal(config.journal_path)
         try:
+            listener = listener_for(config)
             processor = Processor(journal, Telegram(config.telegram_api_base, bot_token), config.bot_name,
                                   config.language, config.reactions, config.retry_delays,
                                   memory=Coppermind(journal.db), claude=claude_for(config), reader=Reader(),
-                                  listener=listener_for(config))
+                                  listener=listener, videos=Videos(listener))
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
                               config.pong_timeout, on_recorded=processor.notify)
             asyncio.run(serve(link, processor))

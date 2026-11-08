@@ -49,14 +49,16 @@ Links and files are read in a lane of their own, one at a time, so that nothing 
 for them. Pages give their title, description, structured data (recipes with ingredients and
 steps) and main text; Instagram and TikTok give their whole caption, and YouTube its title and
 channel, through their public previews, together with the cover image: Claude looks at it,
-which is how a reel without a caption still gets a title. Files sent in the chat (up to the
+which is how a reel without a caption still gets a title. YouTube videos also give, through
+yt-dlp, their description and their subtitles in the original language (never automatic
+translations), or, when there are none, their audio for Whisper. Files sent in the chat (up to the
 Bot API's 20 MB) are downloaded into a temporary folder that disappears right after: Claude
 looks at photos; voice messages, audio and videos are transcribed on your computer by
 whisper.cpp, on the processor and at low priority, and a video also gives four frames for
 Claude to look at. From what was read, Claude describes each item with a kind (recipe,
 article, video, note…), a title, topics and a short summary, which coppermind indexes; what
 was read is data for it, never instructions. A source that cannot be read gets 🤷 on its
-message. Next: subtitles and audio of YouTube videos, documents.
+message. Next: documents and PDFs.
 The architecture, the reasons behind it and the protocol between the two parts are described
 in the README of `sazed-bot`.
 
@@ -109,7 +111,7 @@ computer, stop it here first.
 | Connection | WebSocket client towards `sazed-bot`: backlog on start, periodic `ping`, `ack` once a message is safely recorded in the local journal |
 | Reliability | Every message goes through persistent states (received, read, saved, answered, done, or failed), and every link through its own reading state, with limited retries; one broken item never blocks the others |
 | Agent | The code saves, the model interprets: Claude says what your words are for and describes what was read, as structured data that the code checks and writes; to answer questions it has read-only tools on coppermind, and the recent conversation |
-| Links | Short links followed to their true address; pages read for title, description, structured data and main text; public previews for Instagram, TikTok and YouTube, cover included; never an address inside your home network |
+| Links | Short links followed to their true address; pages read for title, description, structured data and main text; public previews for Instagram, TikTok and YouTube, cover included; description and subtitles of YouTube videos through yt-dlp; never an address inside your home network |
 | Videos and voice messages | ffmpeg for the audio and a few frames, whisper.cpp on the processor for the transcript; yt-dlp for the subtitles and audio of YouTube |
 | Pages and documents | Main-text extraction; MarkItDown and Docling for PDFs and documents |
 | Photos | Claude looks at them and reads the words in them; place and date of the shot from EXIF, with reverse geocoding on OpenStreetMap |

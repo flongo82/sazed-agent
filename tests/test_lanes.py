@@ -15,7 +15,7 @@ from sazed_agent.config import Reactions
 from sazed_agent.coppermind import Coppermind, Draft
 from sazed_agent.journal import Journal
 from sazed_agent.lanes import Processor, lane_for
-from sazed_agent.reader import Extract, Reader
+from sazed_agent.reader import Extract, Reader, ReadError
 from sazed_agent.telegram import Telegram, TelegramError
 from tests import fake_claude
 from tests.fake_claude import interpretation, tool
@@ -49,6 +49,19 @@ class FakeListener:
         return Extract(None, None, self.text, True, self.frames)
 
 
+class FakeVideos:
+    """Una finta lettura dei video: aggiunge una trascrizione all'anteprima, o fallisce."""
+
+    def __init__(self, text="Transcript:\nguanciale e uova", fail=None):
+        self.text, self.fail, self.urls = text, fail, []
+
+    async def read(self, url, preview):
+        self.urls.append(url)
+        if self.fail:
+            raise ReadError(self.fail)
+        return Extract(preview.title, preview.author, self.text, True, preview.images)
+
+
 def text_has(fragment):
     return lambda method, params: method == "sendMessage" and fragment in params.get("text", "")
 
@@ -65,7 +78,8 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.web = FakeWeb()
         self.stop = asyncio.Event()
 
-    def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0, listener=None):
+    def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0, listener=None,
+                  videos=None):
         reader = None
         if reads:
             reader = Reader(transport=self.web.transport, allow=allow_all)
@@ -73,7 +87,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         return Processor(self.journal, Telegram(self.telegram.api_base, token, timeout=5), "Custode", "auto",
                          Reactions("👍", "😢", "🤷"), delays, typing_interval=0.05, idle_wait=5.0,
                          config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait,
-                         listener=listener)
+                         listener=listener, videos=videos)
 
     def with_claude(self, key=fake_claude.KEY, **options):
         """Un finto Claude, e il processore che lo usa."""
@@ -218,6 +232,28 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((item.kind, item.title, item.content), ("recipe", "Torta di mele definitiva", None))
         self.assertEqual(len(fake_claude.images(self.claude.of("describe")[0])), 1)
         self.assertEqual(self.reactions(), ["👍"])
+
+    async def test_a_youtube_video_adds_what_yt_dlp_reads_to_its_preview(self):
+        url = "https://www.youtube.com/watch?v=abc"
+        self.web.oembed("youtube", url, {"title": "Carbonara perfetta", "author_name": "Chef"})
+        self.web.page("https://example.com/torta", ARTICLE)
+        videos = FakeVideos()
+        await self.handle(update(1, url), update(2, "https://example.com/torta"),
+                          processor=self.processor(reads=True, videos=videos))
+        await self.until(lambda: all(i.extraction == "complete" for i in self.items()))
+        video = self.items()[0]
+        self.assertEqual((video.title, video.content), ("Carbonara perfetta", "Transcript:\nguanciale e uova"))
+        self.assertEqual(videos.urls, [url])  # solo i video, non le pagine
+
+    async def test_when_yt_dlp_fails_the_preview_stays(self):
+        url = "https://www.youtube.com/watch?v=abc"
+        self.web.oembed("youtube", url, {"title": "Carbonara perfetta", "author_name": "Chef"})
+        with self.assertLogs("sazed_agent.lanes", "WARNING") as logs:
+            await self.handle(update(1, url), processor=self.processor(reads=True, videos=FakeVideos(fail="bloccato")))
+            await self.until(lambda: self.items()[0].extraction == "partial")
+        self.assertEqual((self.items()[0].title, self.reactions()), ("Carbonara perfetta", ["👍"]))
+        self.assertIn("del video resta l'anteprima (bloccato)", "\n".join(logs.output))
+        self.assertNotIn("abc", "\n".join(logs.output))
 
     async def test_a_voice_message_is_heard_and_described(self):
         self.telegram.file("v", b"OggS voce")
@@ -608,6 +644,23 @@ class TelegramErrors(unittest.IsolatedAsyncioTestCase):
             await telegram.send_message(42, "x")
         self.assertFalse(ctx.exception.permanent or ctx.exception.config_error)
         self.assertNotIn(TOKEN, str(ctx.exception))
+
+    async def test_files_are_downloaded_within_their_limit(self):
+        self.fake.file("v", b"OggS" * 100)
+        destination = Path(tempfile.mkdtemp()) / "file"
+        self.addCleanup(shutil.rmtree, destination.parent)
+        await self.telegram.download(await self.telegram.get_file("v"), destination)
+        self.assertEqual(destination.read_bytes(), b"OggS" * 100)
+        with self.assertRaisesRegex(TelegramError, "oltre 100 byte") as ctx:
+            await self.telegram.download("files/v", destination, limit=100)
+        self.assertTrue(ctx.exception.permanent)
+        with self.assertRaises(TelegramError) as ctx:
+            await Telegram(self.fake.api_base, "1:SBAGLIATO", timeout=5).download("files/v", destination)
+        self.assertTrue(ctx.exception.config_error)
+        self.assertNotIn("SBAGLIATO", str(ctx.exception))
+        with self.assertRaises(TelegramError) as ctx:  # un percorso scaduto: si chiede di nuovo a getFile
+            await self.telegram.download("files/scaduto", destination)
+        self.assertFalse(ctx.exception.permanent or ctx.exception.config_error)
 
     async def test_message_id_is_returned(self):
         self.assertEqual(await self.telegram.send_message(42, "x", reply_to=7), 9000)

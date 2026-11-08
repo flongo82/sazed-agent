@@ -41,7 +41,7 @@ class Listener:
         return Extract(None, None, text, duration is None or duration <= MAX_SECONDS, frames)
 
     async def _probe(self, path):
-        out = await _run([self.ffprobe, "-v", "error", "-print_format", "json", "-show_format",
+        out = await run_program([self.ffprobe, "-v", "error", "-print_format", "json", "-show_format",
                           "-show_streams", str(path)], PROBE_TIMEOUT, "file che non so leggere", permanent=True)
         try:
             data = json.loads(out)
@@ -54,11 +54,11 @@ class Listener:
     async def _transcribe(self, path, work, duration):
         seconds = min(duration or MAX_SECONDS, MAX_SECONDS)
         audio = work / "audio.wav"
-        await _run([self.ffmpeg, "-nostdin", "-v", "error", "-i", str(path), "-vn", "-t", str(MAX_SECONDS),
+        await run_program([self.ffmpeg, "-nostdin", "-v", "error", "-i", str(path), "-vn", "-t", str(MAX_SECONDS),
                     "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(audio)],
                    60 + seconds / 10, "audio che non so estrarre", permanent=True)
         # language auto: i vocali sono in italiano, i reel in qualunque lingua
-        await _run([self.whisper, "-m", str(self.model), "-f", str(audio), "-l", "auto",
+        await run_program([self.whisper, "-m", str(self.model), "-f", str(audio), "-l", "auto",
                     "-t", str(self.threads), "-np", "-nt", "-otxt", "-of", str(work / "text")],
                    120 + seconds * 3, "trascrizione non riuscita", nice=True)
         text = " ".join((work / "text.txt").read_text(encoding="utf-8", errors="replace").split())
@@ -70,7 +70,7 @@ class Listener:
         for i, moment in enumerate(moments):
             frame = work / f"frame{i}.jpg"
             try:
-                await _run([self.ffmpeg, "-nostdin", "-v", "error", "-ss", f"{moment:.2f}", "-i", str(path),
+                await run_program([self.ffmpeg, "-nostdin", "-v", "error", "-ss", f"{moment:.2f}", "-i", str(path),
                             "-frames:v", "1", "-vf", f"scale='min({FRAME_WIDTH},iw)':-2", "-q:v", "5", str(frame)],
                            60, "fotogramma non estratto")
             except ReadError:
@@ -80,7 +80,7 @@ class Listener:
         return tuple(frames)
 
 
-async def _run(command, timeout, failure, permanent=False, nice=False):
+async def run_program(command, timeout, failure, permanent=False, nice=False):
     """Esegue un programma e ne restituisce l'uscita; ReadError se fallisce o non finisce in tempo.
     Con nice, a priorità bassa. Se l'attesa viene interrotta (l'agente si ferma), il programma si
     ferma con lei."""

@@ -68,6 +68,7 @@ class Telegram:
                         raise TelegramError(f"download: file oltre {limit} byte", permanent=True)
                     out.write(chunk)
         except urllib.error.HTTPError as err:
+            err.close()
             if err.code == 401:
                 raise TelegramError(f"download: token del bot rifiutato da Telegram (HTTP {err.code})",
                                     config_error=True) from None
@@ -87,7 +88,8 @@ class Telegram:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 body = json.load(response)
         except urllib.error.HTTPError as err:
-            raise _from_http(method, err.code, _json(err)) from None
+            with err:
+                raise _from_http(method, err.code, _json(err)) from None
         except (urllib.error.URLError, OSError, ValueError) as err:
             # Il motivo, mai la richiesta: l'indirizzo contiene il token.
             reason = getattr(err, "reason", None) or type(err).__name__
