@@ -49,7 +49,6 @@ from .meaning import MeaningError, card
 from .messages import STATUS_COMMANDS, language_for, messages_for
 from .reader import IMAGE_TYPES, MAX_IMAGE, Extract, ReadError
 from .telegram import FILE_MAX, TelegramError
-from .videos import PLATFORMS as VIDEO_PLATFORMS
 
 log = logging.getLogger("sazed_agent.lanes")
 
@@ -540,10 +539,10 @@ class Processor:
         if resolved != item.url and self.memory.relink(item.id, resolved):
             log.info("elemento %s: link breve portato al suo indirizzo", item.id)
         extract = await self.reader.read(resolved)
-        if self.videos is not None and parse_link(resolved).platform in VIDEO_PLATFORMS:
+        if self.videos is not None and parse_link(resolved).platform in self.videos.platforms:
             try:
                 extract = await self.videos.read(resolved, extract)
-            except ReadError as err:  # YouTube che blocca, yt-dlp vecchio: riprovare subito non aiuta
+            except ReadError as err:  # YouTube che blocca, cookie di Instagram scaduti: riprovare subito non aiuta
                 log.warning("elemento %s: del video resta l'anteprima (%s)", item.id, err)
         return extract
 

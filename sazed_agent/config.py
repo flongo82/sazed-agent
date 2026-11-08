@@ -58,6 +58,7 @@ class Config:
     api_hash_file: Path | None
     mtproto_dir: Path | None      # la sessione MTProto del bot, l'unico segreto che si scrive
     anthropic_api_key_file: Path | None  # la chiave dell'API di Claude: scripts/setup-claude.sh
+    instagram_cookies_file: Path | None  # i cookie dell'account secondario: scripts/setup-instagram.sh
     claude_settings: Claude | None       # [claude]: scripts/setup-claude.sh
     whisper: Whisper | None              # [whisper]: senza, vocali e video non si ascoltano
     embeddings: Embeddings | None        # [embeddings]: senza, si cerca solo per parole
@@ -149,6 +150,7 @@ def load(path):
         api_hash_file=_optional_path(root, secrets, "api_hash"),
         mtproto_dir=_optional_path(root, secrets, "mtproto_dir"),
         anthropic_api_key_file=_optional_path(root, secrets, "anthropic_api_key"),
+        instagram_cookies_file=_optional_path(root, secrets, "instagram_cookies"),
         claude_settings=None if claude is None else Claude(
             api_base=_text(claude, "api_base", "claude.").rstrip("/"), model=_text(claude, "model", "claude.")),
         whisper=None if whisper is None else Whisper(root / _text(whisper, "model", "whisper."),

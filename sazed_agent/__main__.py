@@ -77,6 +77,7 @@ def check(config_path):
     print(f"Whisper: {listening(config)}.")
     print(f"File oltre i 20 MB: {big_files_status(config)}.")
     print(f"Ricerca per significato: {meaning_status(config)}.")
+    print(f"Instagram: {instagram_status(config)}.")
 
 
 def big_files_status(config):
@@ -100,7 +101,8 @@ def run(config_path):
             processor = Processor(journal, Telegram(config.telegram_api_base, bot_token), config.bot_name,
                                   config.language, config.reactions, config.retry_delays,
                                   memory=Coppermind(journal.db), claude=claude_for(config), reader=reader,
-                                  listener=listener, videos=Videos(listener), documents=Documents(),
+                                  listener=listener, videos=Videos(listener, cookies=instagram_cookies(config)),
+                                  documents=Documents(),
                                   lookup=Lookup(reader), big_files=big_files_for(config),
                                   meanings=meanings_for(config))
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
@@ -126,6 +128,35 @@ def listening(config):
     if not config.whisper.model.is_file():
         return f"manca il modello {config.whisper.model}: lancia scripts/setup-whisper.sh"
     return f"modello {config.whisper.model.name}, {config.whisper.threads} processori"
+
+
+def instagram_cookies(config):
+    """I cookie dell'account secondario di Instagram, se ci sono e hanno la sessione; senza, dei
+    reel resta l'anteprima pubblica."""
+    path = config.instagram_cookies_file
+    if path is None or not path.is_file():
+        return None
+    if path.stat().st_mode & 0o077:
+        log.warning("Instagram: %s è leggibile da altri utenti (chmod 600): non si usa", path.name)
+        return None
+    if not _has_session(path):
+        log.warning("Instagram: nei cookie manca la sessione: lancia scripts/setup-instagram.sh")
+        return None
+    return path
+
+
+def _has_session(path):
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        fields = line.removeprefix("#HttpOnly_").split("\t")
+        if len(fields) == 7 and fields[5] == "sessionid" and fields[6]:
+            return True
+    return False
+
+
+def instagram_status(config):
+    if instagram_cookies(config) is not None:
+        return "account secondario pronto, dei reel si leggono anche video e audio"
+    return "solo l'anteprima pubblica (per video e audio dei reel: scripts/setup-instagram.sh)"
 
 
 def meanings_for(config):

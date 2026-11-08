@@ -1,41 +1,55 @@
 """I video delle piattaforme, con yt-dlp: descrizione, sottotitoli e, se mancano, l'audio.
 
-Si comincia dall'anteprima pubblica (titolo, canale, copertina), poi yt-dlp aggiunge:
+YouTube. Si comincia dall'anteprima pubblica (titolo, canale, copertina), poi yt-dlp aggiunge:
 - la descrizione del video, che spesso ha la ricetta, i passi o i link;
 - i sottotitoli nella lingua originale: prima quelli scritti da chi ha pubblicato il video,
   poi quelli automatici della lingua parlata (mai le traduzioni automatiche);
 - se non ci sono sottotitoli, l'audio, che chi ascolta (Whisper) trascrive: al più la prima
   mezz'ora, scaricando solo quella.
 
-yt-dlp parte senza configurazione, senza cookie né cache, e mai su una playlist intera. Tutto
-avviene in una cartella temporanea che sparisce subito dopo. Gli errori non riportano
-l'indirizzo del video: i link dell'utente non vanno nei log.
+Instagram, se c'è un account secondario (i suoi cookie, da scripts/setup-instagram.sh): oltre
+alla didascalia e alla copertina dell'anteprima, il video del reel, che chi ascolta trascrive e
+guarda (quattro fotogrammi, per le scritte sul video). Senza account Instagram non dà il video:
+resta l'anteprima, come per un post di sole foto o un carosello.
+
+yt-dlp parte senza configurazione né cache, e mai su una playlist intera; senza cookie, tranne
+quelli dell'account secondario per Instagram, passati come copia: yt-dlp riscrive il file dei
+cookie a fine lavoro, e il segreto non si tocca. Tutto avviene in una cartella temporanea che
+sparisce subito dopo. Gli errori non riportano l'indirizzo del video: i link dell'utente non
+vanno nei log.
 """
 
 import json
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
 from . import listener
+from .coppermind import parse_link
 from .listener import run_program
 from .reader import Extract, ReadError
 
-PLATFORMS = ("youtube",)    # Instagram vuole un account, TikTok per ora non serve
 MAX_TRANSCRIPT = 100_000    # caratteri della trascrizione che si custodiscono
 INFO_TIMEOUT, SUBTITLES_TIMEOUT, AUDIO_TIMEOUT = 90, 90, 600
-BASE = ["--ignore-config", "--no-cookies", "--no-cache-dir", "--no-update", "--no-playlist", "--no-progress",
-        "--no-warnings"]
+BASE = ["--ignore-config", "--no-cache-dir", "--no-update", "--no-playlist", "--no-progress", "--no-warnings"]
+REEL_FORMAT = "bv*[height<=720]+ba/b[height<=720]/b"   # basta per leggere le scritte, e resta leggero
+REEL_MAX = "300M"
 
 
 class Videos:
-    def __init__(self, listener=None, command=("yt-dlp",)):
+    def __init__(self, listener=None, command=("yt-dlp",), cookies=None):
         self.listener = listener  # senza, solo i sottotitoli
         self.command = list(command)
+        self.cookies = Path(cookies) if cookies else None  # dell'account secondario di Instagram
+        self.platforms = ("youtube",) + (("instagram",) if self.cookies else ())  # TikTok per ora non serve
 
     async def read(self, url, preview):
         """Ciò che si legge di un video oltre all'anteprima (preview): un Extract con la
-        descrizione e la trascrizione, completo se la trascrizione copre tutto il video."""
+        descrizione (o la didascalia) e la trascrizione, completo se la trascrizione copre tutto
+        il video."""
+        if parse_link(url).platform == "instagram":
+            return await self._instagram(url, preview)
         with tempfile.TemporaryDirectory(prefix="sazed-") as work:
             work = Path(work)
             info = await self._info(url)
@@ -55,8 +69,39 @@ class Videos:
         return Extract(preview.title or _text(info.get("title")), preview.author or _text(info.get("channel")),
                        "\n\n".join(p for p in parts if p) or preview.text, complete, preview.images)
 
-    async def _info(self, url):
-        out = await self._yt_dlp(["--skip-download", "--dump-single-json", url], INFO_TIMEOUT, "video non letto")
+    async def _instagram(self, url, preview):
+        """Un reel con l'account secondario: il video, che chi ascolta trascrive e guarda, oltre a
+        didascalia e copertina. Un post senza video (foto, carosello) resta all'anteprima."""
+        if self.cookies is None or not self.cookies.is_file() or self.listener is None:
+            raise ReadError("per il video di Instagram servono l'account secondario e Whisper")
+        with tempfile.TemporaryDirectory(prefix="sazed-") as work:
+            work = Path(work)
+            cookies = work / "cookies.txt"
+            shutil.copyfile(self.cookies, cookies)
+            info = await self._info(url, cookies)
+            if "entries" in info or not (info.get("formats") or info.get("url")):
+                raise ReadError("post senza un video solo: resta l'anteprima", permanent=True)
+            duration = info.get("duration") if isinstance(info.get("duration"), (int, float)) else None
+            section = [] if duration is None or duration <= listener.MAX_SECONDS else [
+                "--download-sections", f"*0-{listener.MAX_SECONDS}"]
+            await self._yt_dlp(["-f", REEL_FORMAT, "--merge-output-format", "mp4", "--max-filesize", REEL_MAX,
+                                *section, "-o", str(work / "video.%(ext)s"), url], AUDIO_TIMEOUT,
+                               "video non scaricato", cookies)
+            files = [f for f in work.glob("video.*") if not f.name.endswith(".part")]
+            if not files:
+                raise ReadError("video non scaricato: nessun file")
+            heard = await self.listener.listen(files[0], video=True)
+        caption = preview.text or _text(info.get("description"))
+        parts = [f"Caption:\n{caption}" if caption else None,
+                 f"Transcript:\n{heard.text[:MAX_TRANSCRIPT]}" if heard.text else None]
+        return Extract(preview.title or _text(info.get("title")), preview.author or _text(info.get("uploader")),
+                       "\n\n".join(p for p in parts if p) or None,
+                       heard.complete and (duration is None or duration <= listener.MAX_SECONDS),
+                       (*preview.images, *heard.images))
+
+    async def _info(self, url, cookies=None):
+        out = await self._yt_dlp(["--skip-download", "--dump-single-json", url], INFO_TIMEOUT, "video non letto",
+                                 cookies)
         try:
             info = json.loads(out)
         except ValueError:
@@ -87,9 +132,10 @@ class Videos:
             raise ReadError("audio non scaricato: nessun file")
         return files[0]
 
-    async def _yt_dlp(self, arguments, timeout, failure):
+    async def _yt_dlp(self, arguments, timeout, failure, cookies=None):
+        access = ["--cookies", str(cookies)] if cookies else ["--no-cookies"]
         try:
-            return await run_program([*self.command, *BASE, *arguments], timeout, failure)
+            return await run_program([*self.command, *BASE, *access, *arguments], timeout, failure)
         except ReadError as err:  # "[youtube] <id>: ..." o un indirizzo direbbero quale video: resta il motivo
             reason = re.sub(r"(ERROR: )?\[[^\]]*\] [^:\s]+: ", "", str(err))
             raise ReadError(re.sub(r"https?://\S+", "(indirizzo)", reason), err.permanent) from None

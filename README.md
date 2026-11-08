@@ -35,7 +35,8 @@ spoken in a voice message count like typed ones, so a question asked aloud gets 
   main text;
 - Instagram, TikTok and YouTube: their public previews with the cover image, which Claude
   looks at; for YouTube, also the description and the subtitles in the original language
-  through yt-dlp, or the audio when there are none;
+  through yt-dlp, or the audio when there are none; for Instagram reels, with the cookies of a
+  secondary account, also the video, transcribed and looked at through a few frames;
 - files sent in the chat: photos are looked at by Claude; voice messages, audio and videos are
   transcribed on your computer by whisper.cpp, and a video also gives a few frames;
 - documents (PDF, EPUB, DOCX, ODT, plain text): only their file data and first pages unless
@@ -72,6 +73,8 @@ scripts/setup-whisper.sh  # downloads the whisper.cpp model into models/ (about 
                           # checks it against its known SHA-256
 scripts/setup-embeddings.sh  # downloads the embedding model into models/ (about 639 MB) and
                           # checks it against its known SHA-256
+scripts/setup-instagram.sh <cookies.txt>  # keeps the instagram.com cookies of a secondary
+                          # account, exported from a browser, in secrets/
 scripts/setup-mtproto.sh  # asks for the api_id and api_hash of an application created on
                           # my.telegram.org, to download files beyond the Bot API's 20 MB
 scripts/build.sh          # builds the sazed-agent image (podman rmi sazed-agent removes it)
@@ -85,7 +88,14 @@ scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev,
 Each of Claude, Whisper, the embedding model and MTProto is optional: without Claude the
 words go with the items or become notes, and nothing is described or answered; without the
 Whisper model, voice messages and videos are kept and wait to be heard; without the embedding
-model, search goes by words only; without MTProto, files beyond 20 MB get 🤷.
+model, search goes by words only; without MTProto, files beyond 20 MB get 🤷; without the
+Instagram cookies, reels give only their caption and cover.
+
+Instagram does not give a reel's video without an account. Use a secondary account, never your
+own: Instagram may limit or suspend an account it sees used by a program. Log in with it in a
+browser, export the instagram.com cookies in Netscape format (an extension such as "Get
+cookies.txt LOCALLY" does it), run `scripts/setup-instagram.sh` on that file, then delete the
+file and do not log out of that session.
 
 An API key is not tied to a model: the agent names the model on every request, from the
 `[claude]` section of `config.toml` (Claude Haiku by default, which is plenty for

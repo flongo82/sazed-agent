@@ -55,7 +55,8 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
 - `sazed_agent/lookup.py`: le schede delle opere pubblicate da fonti libere (Open Library,
   Crossref, Wikipedia), con uno User-Agent che dice chi chiama
 - `sazed_agent/videos.py`: i video di YouTube con yt-dlp (senza configurazione, cookie, cache
-  né playlist): descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
+  né playlist), e i reel di Instagram con i cookie dell'account secondario (una copia, perché
+  yt-dlp li riscrive): video trascritto e quattro fotogrammi: descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
   traduzioni), altrimenti l'audio per Whisper; gli errori non dicono quale video
 - `sazed_agent/mtproto.py`: i file oltre i 20 MB via MTProto (Telethon, token del bot, senza
   aggiornamenti), a pezzi da 512 KB in quattro parti insieme; la sessione in `secrets/mtproto/`
@@ -99,6 +100,7 @@ scripts/setup-mtproto.sh           # api_id e api_hash da my.telegram.org, secre
 scripts/setup-claude.sh            # chiave API di Claude (provata con l'API), sezione [claude]
 scripts/setup-whisper.sh           # modello di whisper.cpp in models/ (574 MB), sezione [whisper]
 scripts/setup-embeddings.sh        # modello di embedding in models/ (639 MB), sezione [embeddings]
+scripts/setup-instagram.sh <file>  # cookie di instagram.com dell'account secondario in secrets/
 scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
 scripts/test.sh                    # tutti i test nel container, senza rete
 scripts/test.sh tests.test_journal # un solo modulo di test

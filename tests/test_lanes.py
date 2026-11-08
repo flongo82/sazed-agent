@@ -55,10 +55,12 @@ class FakeListener:
 
 
 class FakeVideos:
-    """Una finta lettura dei video: aggiunge una trascrizione all'anteprima, o fallisce."""
+    """Una finta lettura dei video: aggiunge una trascrizione all'anteprima, o fallisce. Con
+    instagram, come se ci fosse l'account secondario."""
 
-    def __init__(self, text="Transcript:\nguanciale e uova", fail=None):
+    def __init__(self, text="Transcript:\nguanciale e uova", fail=None, instagram=False):
         self.text, self.fail, self.urls = text, fail, []
+        self.platforms = ("youtube", "instagram") if instagram else ("youtube",)
 
     async def read(self, url, preview):
         self.urls.append(url)
@@ -274,6 +276,17 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         video = self.items()[0]
         self.assertEqual((video.title, video.content), ("Carbonara perfetta", "Transcript:\nguanciale e uova"))
         self.assertEqual(videos.urls, [url])  # solo i video, non le pagine
+
+    async def test_a_reel_is_heard_only_with_the_secondary_account(self):
+        reel = "https://www.instagram.com/reel/C0ffee/"
+        self.web.oembed("instagram", reel, {"title": "Pasta e patate\nIngredienti: pasta", "author_name": "chef"})
+        for instagram, expected in ((False, None), (True, "Transcript:\noggi la pasta e patate")):
+            with self.subTest(instagram=instagram):
+                videos = FakeVideos("Transcript:\noggi la pasta e patate", instagram=instagram)
+                reading = self.with_claude(reads=True, videos=videos)
+                item = self.memory.save(42, 70 + instagram, 0, [Draft("link", url=reel + "?n=" + str(instagram))])[0].item
+                extract = await reading._read_link(item)
+                self.assertEqual((len(videos.urls), extract.text if instagram else None), (int(instagram), expected))
 
     async def test_when_yt_dlp_fails_the_preview_stays(self):
         url = "https://www.youtube.com/watch?v=abc"

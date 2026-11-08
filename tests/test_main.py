@@ -60,6 +60,19 @@ class Check(unittest.TestCase):
         self.assertIn("File oltre i 20 MB: MTProto pronto, la sessione si apre al primo file.", out)
         self.assertNotIn("SEGRETO", out)
 
+    def test_instagram_needs_the_cookies_of_a_secondary_account(self):
+        self.assertIn("Instagram: solo l'anteprima pubblica", self.run_check()[1])
+        cookies = self.dir / "secrets" / "instagram_cookies.txt"
+        cookies.write_text(".instagram.com\tTRUE\t/\tTRUE\t0\tcsrftoken\tx\n")
+        cookies.chmod(0o600)
+        self.assertIn("Instagram: solo l'anteprima pubblica", self.run_check()[1])  # senza sessione
+        cookies.write_text("#HttpOnly_.instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tSEGRETO\n")
+        out = self.run_check()[1]
+        self.assertIn("Instagram: account secondario pronto", out)
+        self.assertNotIn("SEGRETO", out)
+        cookies.chmod(0o644)
+        self.assertIn("Instagram: solo l'anteprima pubblica", self.run_check()[1])  # leggibile da altri
+
     def test_search_by_meaning_needs_its_model(self):
         self.assertIn("Ricerca per significato: manca il modello Qwen3-Embedding-0.6B-Q8_0.gguf", self.run_check()[1])
         (self.dir / "models").mkdir()

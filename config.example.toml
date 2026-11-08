@@ -16,6 +16,9 @@ api_hash = "secrets/api_hash"
 mtproto_dir = "secrets/mtproto"   # the bot's MTProto session, written by the agent
 # Claude API key, from the Claude Console: filled in by scripts/setup-claude.sh
 anthropic_api_key = "secrets/anthropic_api_key"
+# Cookies of a secondary Instagram account, to read reels beyond their public preview:
+# filled in by scripts/setup-instagram.sh
+instagram_cookies = "secrets/instagram_cookies.txt"
 
 [storage]
 data_dir = "data"

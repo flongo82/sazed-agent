@@ -23,12 +23,12 @@ def captions(*lines):
 
 
 class FakeListener:
-    def __init__(self, text="guanciale croccante", complete=True):
-        self.text, self.complete, self.heard = text, complete, []
+    def __init__(self, text="guanciale croccante", complete=True, frames=()):
+        self.text, self.complete, self.frames, self.heard = text, complete, frames, []
 
     async def listen(self, path, video=False):
-        self.heard.append(Path(path).read_text())
-        return Extract(None, None, self.text, self.complete, ())
+        self.heard.append((Path(path).read_text(), video))
+        return Extract(None, None, self.text, self.complete, self.frames)
 
 
 class VideosTest(unittest.IsolatedAsyncioTestCase):
@@ -58,7 +58,7 @@ class VideosTest(unittest.IsolatedAsyncioTestCase):
         for flag in ("--ignore-config", "--no-cookies", "--no-cache-dir", "--no-playlist"):
             self.assertIn(flag, info)
         self.assertEqual((subtitles[subtitles.index("--sub-langs") + 1], "--write-subs" in subtitles), ("it", True))
-        self.assertEqual(self.listener.heard, [])
+        self.assertEqual([h for h, _ in self.listener.heard], [])
 
     async def test_automatic_subtitles_only_in_the_spoken_language(self):
         cases = [({"language": "it", "automatic_captions": {"en": [], "it-orig": [], "it": []}}, "it-orig"),
@@ -76,7 +76,7 @@ class VideosTest(unittest.IsolatedAsyncioTestCase):
         self.will(info={"duration": 100, "automatic_captions": {"de": [], "fr": []}}, audio="suono")  # solo traduzioni
         extract = await self.videos.read(URL, PREVIEW)
         self.assertEqual((extract.text, extract.complete), ("Transcript:\nguanciale croccante", True))
-        self.assertEqual(self.listener.heard, ["suono"])
+        self.assertEqual([h for h, _ in self.listener.heard], ["suono"])
         self.assertNotIn("--download-sections", self.calls()[1])
 
     async def test_a_long_video_is_heard_only_at_its_beginning(self):
@@ -108,6 +108,56 @@ class VideosTest(unittest.IsolatedAsyncioTestCase):
     def test_json3_text(self):
         self.assertEqual(_json3(captions("uno| due", "tre")), "uno due tre")
         self.assertEqual(_json3({"events": [{"tStartMs": 0}]}), "")
+
+
+REEL = "https://www.instagram.com/reel/C0ffee/"
+COVER = (("image/jpeg", b"\xff\xd8copertina"),)
+COOKIES = "# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\tSEGRETO\n"
+
+
+class InstagramTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.plan = self.dir / "plan.json"
+        self.cookies = self.dir / "instagram_cookies.txt"
+        self.cookies.write_text(COOKIES)
+        self.listener = FakeListener("Oggi la pasta e patate", frames=(("image/jpeg", b"\xff\xd8f1"),))
+        self.videos = Videos(self.listener, command=(FAKE_YTDLP, str(self.plan)), cookies=self.cookies)
+
+    def will(self, **plan):
+        self.plan.write_text(json.dumps(plan))
+
+    async def test_a_reel_is_heard_and_seen_with_the_secondary_account(self):
+        self.will(info={"duration": 45, "formats": [{"format_id": "1"}], "uploader": "chef"}, video="mp4 del reel")
+        preview = Extract("Pasta e patate", "chef", "Pasta e patate\nIngredienti: pasta, patate", False, COVER)
+        extract = await self.videos.read(REEL, preview)
+        self.assertEqual(extract.text, "Caption:\nPasta e patate\nIngredienti: pasta, patate\n\n"
+                                       "Transcript:\nOggi la pasta e patate")
+        self.assertEqual((extract.complete, extract.images), (True, COVER + self.listener.frames))
+        self.assertEqual(self.listener.heard, [("mp4 del reel", True)])  # anche i fotogrammi
+        info, download = json.loads((self.dir / "calls.json").read_text())
+        for call in (info, download):
+            jar = call[call.index("--cookies") + 1]
+            self.assertNotEqual(jar, str(self.cookies))  # una copia, nella cartella temporanea
+            self.assertNotIn("--no-cookies", call)
+        self.assertFalse(Path(jar).exists())  # sparita con la cartella
+        self.assertEqual(self.cookies.read_text(), COOKIES)  # il segreto non cambia
+        self.assertEqual(json.loads((self.dir / "cookies.json").read_text())[0], COOKIES)
+
+    async def test_a_post_without_a_single_video_keeps_its_preview(self):
+        for info in ({"entries": [{"formats": []}]}, {"formats": []}):
+            self.will(info=info)
+            with self.subTest(info=info), self.assertRaises(ReadError) as ctx:
+                await self.videos.read(REEL, Extract(None, None, "didascalia", False, COVER))
+            self.assertTrue(ctx.exception.permanent)
+
+    async def test_without_the_account_instagram_is_not_for_yt_dlp(self):
+        plain = Videos(self.listener, command=(FAKE_YTDLP, str(self.plan)))
+        self.assertEqual((plain.platforms, self.videos.platforms), (("youtube",), ("youtube", "instagram")))
+        with self.assertRaises(ReadError):
+            await plain.read(REEL, Extract(None, None, "didascalia", False, COVER))
+        self.assertFalse((self.dir / "calls.json").exists())
 
 
 if __name__ == "__main__":
