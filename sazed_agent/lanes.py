@@ -485,7 +485,7 @@ class Processor:
             self.wake["reading"].set()  # l'utente l'ha chiesto mentre lo si sfogliava
             return
         description = None
-        if self.claude is not None and (extract.text or extract.title or extract.images):
+        if self.claude is not None and (extract.text or extract.title or extract.images or extract.screen_text):
             try:
                 description = await self._describe(item, extract)
                 if self._video_needed(item, extract, description):
@@ -503,14 +503,15 @@ class Processor:
                     return
                 log.warning("elemento %s custodito senza descrizione: %s", item.id, err)
         d = description
-        content = "\n\n".join(p for p in (extract.text, d and d.image_text and f"Text in the images:\n{d.image_text}")
-                              if p) or None
+        written = (d and d.image_text) or extract.screen_text  # la lettura di Claude, o quella di tesseract
+        content = "\n\n".join(p for p in (extract.text, written and f"Text in the images:\n{written}") if p) or None
         self.memory.read_done(item.id, "complete" if extract.complete else "partial", content=content,
                               title=(d and d.title) or extract.title, kind=d and d.kind,
                               topics=d.topics if d else (), summary=d and d.summary, authors=d.authors if d else ())
         log.info("elemento %s letto (%s)%s", item.id, "completo" if extract.complete else "in parte",
                  "" if d else ", senza descrizione")
-        if not (extract.text or extract.title or extract.images) or d is not None and not d.useful:
+        read_something = extract.text or extract.title or extract.images or extract.screen_text
+        if not read_something or d is not None and not d.useful:
             await self._say_unknown(item, "unknown")  # non si è letto nulla, o nulla che dica qualcosa
         self._read_over()
 

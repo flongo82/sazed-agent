@@ -427,7 +427,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
             comment=m["current"]["words"], comment_on=[i["id"] for i in m["current"]["items"]]
             or [i["id"] for c in m["conversation"] for i in c.get("items", ())]))
         self.record(p, update(1, video={"file_id": "v1", "file_unique_id": "V1"}))
-        await self.until(lambda: self.replies())
+        await self.until(lambda: self.journal.get(1).reply_text)  # mandato, poi annotato nel registro
         self.assertEqual(self.replies(), ["Ciao Ada, di questo non sono riuscito a capire di che cosa parla: "
                                           "scrivimi due parole e le terrò insieme."])
         notice = self.telegram.ok_calls("sendMessage")[0][1]

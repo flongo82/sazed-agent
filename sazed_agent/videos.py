@@ -101,7 +101,7 @@ class Videos:
         return Extract(preview.title or _text(info.get("title")), preview.author or _text(info.get("uploader")),
                        "\n\n".join(p for p in parts if p) or None,
                        heard.complete and (duration is None or duration <= listener.MAX_SECONDS),
-                       (*preview.images, *heard.images))
+                       (*preview.images, *heard.images), heard.screen_text)
 
     async def _info(self, url, cookies=None):
         out = await self._yt_dlp(["--skip-download", "--dump-single-json", url], INFO_TIMEOUT, "video non letto",

@@ -12,6 +12,7 @@ from pathlib import Path
 from sazed_agent import listener
 from sazed_agent.listener import Listener
 from sazed_agent.reader import ReadError
+from tests.files import pdf
 
 FAKE_WHISPER = str(Path(__file__).with_name("fake_whisper.py"))
 
@@ -30,9 +31,20 @@ class ListenerTest(unittest.IsolatedAsyncioTestCase):
         ffmpeg(*sine, "-c:a", "libopus", str(cls.media / "voice.ogg"))
         ffmpeg(*picture, *sine, "-c:v", "mpeg4", "-c:a", "aac", "-shortest", str(cls.media / "video.mp4"))
         ffmpeg(*picture, "-c:v", "mpeg4", str(cls.media / "silent.mp4"))
-        # tre secondi rossi, poi tre blu: come una scritta che cambia su un video fermo
+        # tre secondi rossi, poi tre blu: un video senza scritte
         ffmpeg("-f", "lavfi", "-i", "color=c=red:s=320x568:d=3:r=10", "-f", "lavfi", "-i",
                "color=c=blue:s=320x568:d=3:r=10", "-filter_complex", "[0][1]concat=n=2:v=1", "-c:v", "mpeg4",
+               str(cls.media / "colors.mp4"))
+        # tre schermate di testo, due secondi ciascuna: un reel muto fatto di scritte
+        (cls.media / "slides.pdf").write_bytes(pdf(["PASTA E PATATE", "Trecento grammi di pasta mista",
+                                                    "Manteca con la provola"]))
+        subprocess.run(["pdftoppm", "-png", "-r", "60", str(cls.media / "slides.pdf"), str(cls.media / "s")],
+                       check=True)
+        pages = sorted(cls.media.glob("s-*.png"))
+        inputs = [a for page in pages for a in ("-loop", "1", "-t", "2", "-i", str(page))]
+        chain = "".join(f"[{i}]scale=720:1280,setsar=1[v{i}];" for i in range(len(pages)))
+        ffmpeg(*inputs, "-filter_complex", chain + "".join(f"[v{i}]" for i in range(len(pages)))
+               + f"concat=n={len(pages)}:v=1[out]", "-map", "[out]", "-r", "10", "-c:v", "mpeg4",
                str(cls.media / "slides.mp4"))
         (cls.media / "notes.txt").write_text("non sono un audio")
 
@@ -64,24 +76,56 @@ class ListenerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((args[args.index("-l") + 1], args[args.index("-t") + 1]), ("auto", "3"))
         self.assertEqual(heard["nice"], 10)  # priorità bassa
 
-    async def test_a_video_gives_its_words_and_a_frame_each_time_the_picture_changes(self):
+    async def test_a_video_gives_its_words_and_frames_for_claude(self):
         extract = await self.listener.listen(self.media / "video.mp4", video=True)
         self.assertEqual(extract.text, "Comprare il riso e il parmigiano")
         self.assertTrue(all(kind == "image/jpeg" and data[:2] == b"\xff\xd8" for kind, data in extract.images))
-        self.assertEqual(len(extract.images), 8)  # testsrc cambia sempre: due al secondo, per quattro secondi
-        self.assertEqual(len({data for _, data in extract.images}), 8)
-        slides = await self.listener.listen(self.media / "slides.mp4", video=True)
-        self.assertEqual(len(slides.images), 2)  # un fotogramma per ogni immagine diversa, non per ogni istante
+        self.assertTrue(1 <= len(extract.images) <= listener.CLAUDE_FRAMES)
 
-    async def test_a_long_changing_video_gives_frames_spread_over_all_of_it(self):
-        with mock.patch.object(listener, "MAX_FRAMES", 3):
-            extract = await self.listener.listen(self.media / "silent.mp4", video=True)
-        self.assertEqual(len(extract.images), 3)
-
-    async def test_a_video_without_sound_gives_only_frames(self):
-        extract = await self.listener.listen(self.media / "silent.mp4", video=True)
-        self.assertEqual((extract.text, len(extract.images)), (None, 8))
+    async def test_the_writing_of_a_silent_video_is_read_on_this_computer_in_order(self):
+        extract = await self.listener.listen(self.media / "slides.mp4", video=True)
+        self.assertEqual(extract.screen_text, "PASTA E PATATE\nTrecento grammi di pasta mista\nManteca con la provola")
+        self.assertIsNone(extract.text)
+        self.assertEqual(len(extract.images), 4)  # una per scritta, più una per arrivare a quattro
         self.assertIsNone(self.heard())  # Whisper non serve
+
+    async def test_a_video_without_writing_still_shows_a_few_frames(self):
+        extract = await self.listener.listen(self.media / "colors.mp4", video=True)
+        self.assertEqual((extract.screen_text, len(extract.images)), (None, listener.CONTEXT_FRAMES))
+
+    async def test_a_long_video_is_read_at_fewer_frames_per_second(self):
+        with mock.patch.object(listener, "SCREEN_FRAMES", 2):
+            extract = await self.listener.listen(self.media / "colors.mp4", video=True)
+        self.assertEqual(len(extract.images), 2)
+
+
+class CaptionsTest(unittest.TestCase):
+    def test_close_frames_with_the_same_writing_are_one_caption(self):
+        pages = [["3", "UOVA", "E", "200", "G"], ["UOVA", "E", "200", "G", "DI", "ZUCCHERO"], [],
+                 ["UOVA", "200", "ZUCCHERO"], ["Monta", "tutto", "per", "10", "minuti"], [], [], [],
+                 ["Monta", "tutto", "per", "10", "minuti"]]
+        self.assertEqual(listener._captions(pages), [(0, 3, "UOVA E 200 G DI ZUCCHERO"),
+                                                     (4, 4, "Monta tutto per 10 minuti"),
+                                                     (8, 8, "Monta tutto per 10 minuti")])  # tornata dopo un po'
+
+    def test_noise_that_changes_from_frame_to_frame_goes_away(self):
+        pages = [["TIRAMISU", "Sa", "IN"], ["TIRAMISU", "IN", "Pei", "5"], ["5", "TIRAMISU", "ty"], ["MINUTI"]]
+        self.assertEqual(listener._steady(pages), [["TIRAMISU", "IN"], ["TIRAMISU", "IN", "5"], ["5", "TIRAMISU"], []])
+        self.assertEqual(listener._steady([["solo"], ["due"]]), [["solo"], ["due"]])
+
+    def test_claude_sees_a_frame_per_caption_and_at_least_a_few(self):
+        self.assertEqual(listener._chosen([(0, 3, "a"), (4, 6, "b")], 20), [0, 1, 5, 6])  # 1 e 5 a metà delle scritte
+        many = [(i, i, str(i)) for i in range(0, 60, 2)]
+        self.assertEqual(len(listener._chosen(many, 60)), listener.CLAUDE_FRAMES)
+        self.assertEqual(listener._chosen([], 1), [0])
+
+    def test_only_words_tesseract_is_sure_of(self):
+        header = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"
+        rows = [header, "5\t1\t1\t1\t1\t1\t0\t0\t9\t9\t91.5\tMonta", "5\t1\t1\t1\t1\t2\t0\t0\t9\t9\t30\tx#q",
+                "5\t1\t1\t1\t1\t3\t0\t0\t9\t9\t88\t3", "5\t1\t1\t1\t1\t4\t0\t0\t9\t9\t95\t)", "1\t1\t0\t0\t0\t0",
+                "5\t1\t1\t1\t1\t5\t0\t0\t9\t9\t92\tE", "5\t1\t1\t1\t1\t6\t0\t0\t9\t9\t70\ti"]
+        self.assertEqual(listener._confident("\n".join(rows)), ["Monta", "3", "E"])  # "i" non abbastanza sicura
+
 
     async def test_silence_is_no_text(self):
         self.will({"text": " \n "})

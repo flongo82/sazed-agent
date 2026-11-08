@@ -38,6 +38,7 @@ class Setup(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -271,6 +272,7 @@ class SetupClaude(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
 
     def setUp(self):
         FakeClaude.seen.clear()

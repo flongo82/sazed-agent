@@ -39,9 +39,10 @@ spoken in a voice message count like typed ones, so a question asked aloud gets 
   cover say too little, also its video, asked for without an account when Instagram gives it,
   transcribed and read through its frames;
 - files sent in the chat: photos are looked at by Claude; voice messages, audio and videos are
-  transcribed on your computer by whisper.cpp, and a video also gives a frame each time its
-  picture changes (up to 30), so that Claude reads the words that appear on it: in a reel without
-  sound or caption they are often all it says;
+  transcribed on your computer by whisper.cpp, and the writing on a video is read on your
+  computer too: tesseract reads a frame every second, repeated captions become one, and Claude
+  gets that text with a frame for each different caption, to read it cleanly. In a reel without
+  sound or caption the writing is often all it says;
 - documents (PDF, EPUB, DOCX, ODT, plain text): only their file data and first pages unless
   you ask for more, enough for the title, the authors and a paper's abstract. When a published
   work's first pages do not say what it is about, its card is looked up in free catalogues

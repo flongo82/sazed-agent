@@ -65,6 +65,7 @@ class Extract:
     text: str | None     # tutto ciò che si è letto, con descrizione e dati strutturati
     complete: bool       # False quando manca una parte (l'audio di un video, per esempio)
     images: tuple = ()   # immagini viste alla fonte, come (tipo, byte): la copertina di un video
+    screen_text: str | None = None   # le scritte sui fotogrammi di un video, lette in locale (tesseract)
 
 
 async def public_host(host):

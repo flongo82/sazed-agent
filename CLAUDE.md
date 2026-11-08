@@ -48,7 +48,8 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
   JSON-LD, testo principale), anteprime oEmbed con la copertina (per Claude, mai su disco);
   solo host pubblici, al massimo 5 MB
 - `sazed_agent/listener.py`: l'ascolto dei file: ffprobe, audio a 16 kHz e fotogrammi con
-  ffmpeg (uno ogni volta che l'immagine cambia, al più 30, per le scritte), trascrizione con whisper.cpp (priorità bassa, al più mezz'ora), in una cartella
+  ffmpeg (uno al secondo), scritte lette in locale da tesseract e unite in ordine, un fotogramma
+  per scritta diversa a Claude; trascrizione con whisper.cpp (priorità bassa, al più mezz'ora), in una cartella
   temporanea che sparisce subito dopo
 - `sazed_agent/documents.py`: i documenti: dati del file e prime pagine, o tutto il testo su
   richiesta; PDF con poppler, EPUB, DOCX e ODT con la libreria standard e limiti sugli archivi
