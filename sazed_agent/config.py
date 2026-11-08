@@ -40,6 +40,12 @@ class Whisper:
 
 
 @dataclass(frozen=True)
+class Embeddings:
+    model: Path    # il modello di embedding per llama-server: scripts/setup-embeddings.sh
+    threads: int
+
+
+@dataclass(frozen=True)
 class Config:
     root: Path
     bot_name: str
@@ -54,6 +60,7 @@ class Config:
     anthropic_api_key_file: Path | None  # la chiave dell'API di Claude: scripts/setup-claude.sh
     claude_settings: Claude | None       # [claude]: scripts/setup-claude.sh
     whisper: Whisper | None              # [whisper]: senza, vocali e video non si ascoltano
+    embeddings: Embeddings | None        # [embeddings]: senza, si cerca solo per parole
     telegram_api_base: str
     reactions: Reactions
     ping_interval: float
@@ -117,9 +124,7 @@ def load(path):
     reactions, connection, retries = section("reactions"), section("connection"), section("retries")
     claude = section("claude") if "claude" in raw else None
     whisper = section("whisper") if "whisper" in raw else None
-    threads = None if whisper is None else whisper.get("threads")
-    if whisper is not None and (not isinstance(threads, int) or isinstance(threads, bool) or threads < 1):
-        raise ConfigError("whisper.threads deve essere un numero intero positivo")
+    embeddings = section("embeddings") if "embeddings" in raw else None
 
     language = _text(raw, "language").lower()
     if language != "auto" and language not in MESSAGES:
@@ -146,7 +151,10 @@ def load(path):
         anthropic_api_key_file=_optional_path(root, secrets, "anthropic_api_key"),
         claude_settings=None if claude is None else Claude(
             api_base=_text(claude, "api_base", "claude.").rstrip("/"), model=_text(claude, "model", "claude.")),
-        whisper=None if whisper is None else Whisper(root / _text(whisper, "model", "whisper."), threads),
+        whisper=None if whisper is None else Whisper(root / _text(whisper, "model", "whisper."),
+                                                     _threads(whisper, "whisper.")),
+        embeddings=None if embeddings is None else Embeddings(root / _text(embeddings, "model", "embeddings."),
+                                                              _threads(embeddings, "embeddings.")),
         telegram_api_base=_text(telegram, "api_base", "telegram.").rstrip("/"),
         reactions=Reactions(
             received=_text(reactions, "received", "reactions."),
@@ -157,6 +165,13 @@ def load(path):
         pong_timeout=pong_timeout,
         retry_delays=tuple(float(d) for d in delays),
     )
+
+
+def _threads(section, prefix):
+    threads = section.get("threads")
+    if not isinstance(threads, int) or isinstance(threads, bool) or threads < 1:
+        raise ConfigError(f"{prefix}threads deve essere un numero intero positivo")
+    return threads
 
 
 def _table(raw, name):

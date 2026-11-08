@@ -32,7 +32,7 @@ fatta a voce ha la sua risposta. Documenti (PDF, EPUB, DOCX, ODT, testo) letti i
 R9, con le schede di Open Library, Crossref e Wikipedia per le opere pubblicate senza abstract, e
 letti tutti solo su richiesta. I file chiesti tornano in chat (R6); i file oltre i 20 MB si
 scaricano via MTProto, quattro parti insieme (R7). Passo 4.3 completato; R8 (foto con EXIF)
-rimandato.
+rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di apt.
 
 ## Struttura
 
@@ -59,6 +59,9 @@ rimandato.
   traduzioni), altrimenti l'audio per Whisper; gli errori non dicono quale video
 - `sazed_agent/mtproto.py`: i file oltre i 20 MB via MTProto (Telethon, token del bot, senza
   aggiornamenti), a pezzi da 512 KB in quattro parti insieme; la sessione in `secrets/mtproto/`
+- `sazed_agent/meaning.py`: il significato dei testi: `llama-server` (llama.cpp) con il modello
+  di embedding, su un socket UNIX privato e con una chiave nuova a ogni avvio; la scheda di un
+  elemento (`card`)
 - `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale): interpret (a che cosa servono le
   parole, nel filo), describe (dal contenuto letto), answer (strumenti di sola lettura su
   coppermind); risposte strutturate controllate prima dell'uso; errori come quelli di Telegram
@@ -73,16 +76,18 @@ rimandato.
   finto sazed-bot e un finto Telegram, `fake_claude.py` una finta API di Claude, `test_flow.py`
   prova il giro completo, `fake_web.py` un finto web per il lettore (httpx.MockTransport),
   `fake_whisper.py` e `fake_ytdlp.py` un finto `whisper-cli` e un finto `yt-dlp` (i test di
-  `listener.py` usano il vero ffmpeg), `files.py` costruisce PDF, EPUB, DOCX e ODT per i test
+  `listener.py` usano il vero ffmpeg), `fake_llama_server.py` un finto `llama-server` e
+  `fake_meanings.py` un finto calcolo dei significati, `files.py` costruisce PDF, EPUB, DOCX e ODT per i test
   (quelli di `documents.py` usano il vero poppler).
   `contract.py`
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
-- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg, whisper.cpp, yt-dlp e poppler-utils da apt), build,
+- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg, whisper.cpp, yt-dlp, poppler-utils e llama.cpp da apt), build,
   test, setup
-- `models/`: il modello di whisper.cpp (escluso da git, montato in sola lettura), scaricato e
-  verificato con la sua impronta da `scripts/setup-whisper.sh`
+- `models/`: i modelli di whisper.cpp e di embedding (esclusi da git, montati in sola lettura),
+  scaricati e verificati con la loro impronta da `scripts/setup-whisper.sh` e
+  `scripts/setup-embeddings.sh`
 - `pip-requirements.txt`: ciò che apt non ha, con versione e hash (oggi solo `jiter`, che
   `python3-anthropic` di Ubuntu importa senza dichiararlo)
 
@@ -93,6 +98,7 @@ scripts/setup.sh                   # segreti e config.toml (chiede il token del 
 scripts/setup-mtproto.sh           # api_id e api_hash da my.telegram.org, secrets/mtproto/
 scripts/setup-claude.sh            # chiave API di Claude (provata con l'API), sezione [claude]
 scripts/setup-whisper.sh           # modello di whisper.cpp in models/ (574 MB), sezione [whisper]
+scripts/setup-embeddings.sh        # modello di embedding in models/ (639 MB), sezione [embeddings]
 scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
 scripts/test.sh                    # tutti i test nel container, senza rete
 scripts/test.sh tests.test_journal # un solo modulo di test
@@ -127,7 +133,8 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   scrive. Per le domande Claude ha solo strumenti di lettura su coppermind, mai shell o file, più
   `send_back`, che sceglie i file da rimandare: li rimanda il codice, dopo la risposta, solo
   nella chat dell'utente e al massimo cinque.
-- Quattro corsie: comandi, ingresso, risposte, lettura. Domande e comandi non aspettano mai
+- Cinque corsie: comandi, ingresso, risposte, lettura, significati (i vettori degli elementi
+  letti o cambiati, con `llama-server`; se non risponde, una pausa). Domande e comandi non aspettano mai
   dietro una lettura; una domanda aspetta solo la lettura degli elementi di cui parla, al
   massimo `READ_WAIT`. Appena arriva un messaggio, 👍 ne segnala la presa in carico: ciò che si
   custodisce non riceve altre risposte. 🤷 dice che la fonte di un link non si è letta, 😢 che

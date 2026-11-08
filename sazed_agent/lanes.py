@@ -14,6 +14,8 @@ le domande che non aspettano dietro una lettura lunga.
   coppermind. Se l'utente chiede un file, dopo la risposta il codice gliene rimanda il messaggio
   originale (copiato; se non c'è più, il file dal suo file_id). Da qui passano anche le risposte
   fisse (comando sconosciuto, messaggio che non si sa custodire);
+- significati: per ogni elemento letto o cambiato, il vettore della sua scheda, con il modello
+  di embedding (se c'è), per cercare anche per significato; uno alla volta, a priorità bassa;
 - lettura: un elemento alla volta, prima quelli che qualcuno aspetta (un vocale da
   interpretare, ciò di cui parla una domanda). I link si leggono alla fonte, e dei video di
   YouTube anche descrizione e sottotitoli (o l'audio); i file si scaricano da Telegram in una
@@ -43,6 +45,7 @@ from pathlib import Path
 from . import intake
 from .claude import ClaudeError, Interpretation, view
 from .coppermind import FILES, Coppermind, Draft, parse_link, unique
+from .meaning import MeaningError, card
 from .messages import STATUS_COMMANDS, language_for, messages_for
 from .reader import IMAGE_TYPES, MAX_IMAGE, Extract, ReadError
 from .telegram import FILE_MAX, TelegramError
@@ -54,6 +57,8 @@ ACTIVE = ("received", "read", "saved", "answered")
 INTAKE, ANSWERS = ("received", "read"), ("saved", "answered")
 THREAD_WINDOW, THREAD_LIMIT = 3 * 3600, 10   # il filo: i messaggi delle ultime ore, fino a dieci
 READ_WAIT = 600     # quanto una domanda aspetta la lettura degli elementi di cui parla
+MEANING_BATCH = 8   # schede calcolate insieme
+MEANING_PAUSE = 300 # dopo un errore di llama-server, prima di riprovare
 LISTEN_WAIT = 3600  # quanto un vocale aspetta la trascrizione, anche dietro un video lungo
 # Ciò che si sa leggere, e con che cosa: i link con il lettore, le foto con Claude (che le
 # guarda), vocali, audio e video con chi ascolta (Whisper), i documenti con chi li sfoglia.
@@ -79,7 +84,7 @@ class Processor:
     def __init__(self, journal, telegram, bot_name, language, reactions, retry_delays,
                  typing_interval=4.0, idle_wait=60.0, config_pause=60.0, clock=time.time, memory=None,
                  claude=None, reader=None, read_wait=READ_WAIT, listener=None, videos=None,
-                 listen_wait=LISTEN_WAIT, documents=None, lookup=None, big_files=None):
+                 listen_wait=LISTEN_WAIT, documents=None, lookup=None, big_files=None, meanings=None):
         self.journal, self.telegram = journal, telegram
         self.memory = memory or Coppermind(journal.db, clock)  # nello stesso database del registro
         self.claude = claude  # senza, le parole accompagnano i link o sono una nota, e nulla si descrive
@@ -89,13 +94,14 @@ class Processor:
         self.documents = documents  # senza, i documenti non si leggono
         self.lookup = lookup  # senza, di un libro senza abstract resta ciò che dicono le prime pagine
         self.big_files = big_files  # MTProto: senza, un file oltre i 20 MB non si scarica
+        self.meanings = meanings  # senza, si cerca solo per parole
         self.readable = ((LINKS if reader is not None else ()) + (PICTURES if claude is not None else ())
                          + (RECORDINGS if listener is not None else ()) + (PAPERS if documents is not None else ()))
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
         self.retry_delays, self.typing_interval, self.idle_wait = retry_delays, typing_interval, idle_wait
         self.config_pause = config_pause  # attesa dopo un token rifiutato, senza contare tentativi
         self.clock, self.read_wait, self.listen_wait = clock, read_wait, listen_wait
-        self.wake = {lane: asyncio.Event() for lane in ("commands", "intake", "answers", "reading")}
+        self.wake = {lane: asyncio.Event() for lane in ("commands", "intake", "answers", "reading", "meaning")}
 
     def notify(self):
         """C'è lavoro nuovo nel registro: sveglia le corsie."""
@@ -104,7 +110,7 @@ class Processor:
 
     async def run(self, stop):
         await asyncio.gather(self._lane("commands", stop), self._lane("intake", stop),
-                             self._lane("answers", stop), self._reading(stop))
+                             self._lane("answers", stop), self._reading(stop), self._meaning(stop))
 
     async def _lane(self, lane, stop):
         pick, handle = {"commands": (self._next_command, self._command),
@@ -221,6 +227,7 @@ class Processor:
             self.journal.advance(entry.update_id, "saved")
         if meaning.read_in_full:
             self.wake["reading"].set()
+        self.wake["meaning"].set()  # una nota o un commento nuovi
         log.info("elemento %s in coppermind: %d link e file, %s%s", entry.update_id, len(pairs), _summary(meaning),
                  "; il vocale portava solo parole e non si custodisce" if forget else "")
         if self._needs_reply(reading, meaning):
@@ -388,7 +395,8 @@ class Processor:
         today = time.strftime("%Y-%m-%d", time.localtime(self.clock()))
         async with self._typing(entry.chat_id):
             answer = await self.claude.answer(self._thread(entry, reading), meaning.question, about,
-                                              self._language(entry.update), self.memory, today, bool(meaning.spoken))
+                                              self._language(entry.update), self.memory, today, bool(meaning.spoken),
+                                              self.meanings)
         if answer is None:
             return t["no_answer"], ()
         return answer.text or t["here_it_is"](len(answer.send_back)), answer.send_back
@@ -499,9 +507,33 @@ class Processor:
         return await self.claude.describe(item, extract, language, found=found) or d
 
     def _read_over(self):
-        """Una lettura è finita: chi la aspettava (un vocale da interpretare, una domanda) riparte."""
+        """Una lettura è finita: chi la aspettava (un vocale da interpretare, una domanda) riparte,
+        e c'è un significato da calcolare."""
         self.wake["intake"].set()
         self.wake["answers"].set()
+        self.wake["meaning"].set()
+
+    # --- significati ---
+
+    async def _meaning(self, stop):
+        """I vettori degli elementi letti o cambiati, a gruppi. Se llama-server non risponde, si
+        riprova dopo una pausa: la ricerca per parole intanto funziona."""
+        while self.meanings is not None and not stop.is_set():
+            self.wake["meaning"].clear()
+            items = self.memory.to_mean(self.meanings.name, MEANING_BATCH)
+            if not items:
+                await self._sleep("meaning", stop, None)
+                continue
+            try:
+                vectors = await self.meanings.vectors([card(i) for i in items])
+            except MeaningError as err:  # una pausa vera: un avviso di lavoro nuovo non la accorcia
+                log.warning("significati non calcolati: %s (si riprova tra %d s)", err, MEANING_PAUSE)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), MEANING_PAUSE)
+                continue
+            for item, vector in zip(items, vectors):
+                self.memory.set_meaning(item.id, self.meanings.name, vector, item.updated_at)
+            log.info("significato di %d elementi calcolato", len(items))
 
     async def _read_link(self, item):
         resolved = await self.reader.resolve(item.url)  # un link breve rimasto tale all'ingresso

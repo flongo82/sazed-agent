@@ -9,11 +9,14 @@ FROM docker.io/library/ubuntu:26.04
 # yt-dlp: descrizione, sottotitoli e, se mancano, audio dei video di YouTube.
 # poppler-utils: dei PDF i dati, il testo (le prime pagine, o tutto se richiesto) e la prima
 #   pagina come immagine, quando è una scansione.
+# llama.cpp-tools: llama-server calcola gli embedding per la ricerca per significato; il modello
+#   sta in models/. python3-numpy li confronta.
 # pip serve solo a installare pip-requirements.txt (ciò che apt non ha), poi se ne va.
 COPY pip-requirements.txt /tmp/
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-websockets python3-telethon \
-      python3-anthropic ffmpeg whisper.cpp yt-dlp poppler-utils ca-certificates python3-pip \
+      python3-anthropic ffmpeg whisper.cpp yt-dlp poppler-utils llama.cpp-tools python3-numpy \
+      ca-certificates python3-pip \
  && pip install --no-deps --require-hashes --only-binary=:all: --no-cache-dir \
       --break-system-packages -r /tmp/pip-requirements.txt \
  && apt-get purge -y --auto-remove python3-pip \

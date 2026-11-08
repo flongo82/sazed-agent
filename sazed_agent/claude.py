@@ -10,7 +10,8 @@ Tre compiti, ognuno con la sua richiesta:
   e dalle immagini viste lì (la copertina o i fotogrammi di un video, una foto); di un documento
   anche gli autori e se è un'opera pubblicata, e il riassunto può venire da una scheda trovata
   in un catalogo pubblico, se parla della stessa opera;
-- answer: la risposta a una domanda, con tre strumenti di sola lettura su coppermind, più
+- answer: la risposta a una domanda, con strumenti di sola lettura su coppermind (per parole,
+  per significato se c'è il modello, un elemento, i passaggi di un testo lungo), più
   send_back, con cui Claude sceglie i file di cui rimandare il messaggio originale: li rimanda il
   codice, dopo la risposta e solo nella chat dell'utente.
 
@@ -34,6 +35,7 @@ import anthropic
 from pydantic import BaseModel
 
 from .coppermind import FILES, SOURCES, parse_link, platform_label
+from .meaning import MeaningError
 
 log = logging.getLogger("sazed_agent.claude")
 
@@ -48,6 +50,7 @@ ITEM_CONTENT_MAX = 6_000  # per rispondere, di ogni elemento
 ANSWER_TURNS = 6          # giri di strumenti al massimo per una risposta
 SEARCH_MAX = 20
 SEND_MAX = 5              # file rimandati al massimo con una risposta
+MEANING_FLOOR = 0.3       # sotto questa somiglianza un elemento non c'entra con la domanda
 
 INTERPRET = """You read the messages one person sends to sazed, their personal knowledge base \
 on Telegram. They send things to keep (notes, links, photos, voice messages, files), comments \
@@ -128,7 +131,9 @@ its source. The items the question is about, if any, come with the question; the
 conversation helps to understand it. When the question was asked in a voice message (spoken), \
 it is an automatic transcript that can mishear words, names above all: look for what was meant. \
 read_passages finds the passages of a long text (a document or a book read in full) that speak \
-of something.
+of something. search_meaning, when there, finds items by what they are about, even with other \
+words or in another language: use it for vague memories and descriptions, and when search_items \
+finds nothing; its similarity says how close each item is.
 
 Documents are read only in part unless the person asks (reading partial: the file data and the \
 first pages, sometimes with a summary from a public catalogue): when a question needs more, say \
@@ -209,6 +214,30 @@ TOOLS = [
         },
     },
 ]
+
+
+MEANING_TOOL = {
+    "name": "search_meaning",
+    "description": (
+        "Items closest in meaning to the given text, even with other words or in another language, most "
+        "similar first, each with its similarity (0 to 1: above about 0.45 usually relevant). Accepts the "
+        "same exact filters as search_items."),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "what the items should be about, in any words"},
+            "kind": {"type": "string", "enum": list(KINDS)},
+            "source": {"type": "string", "enum": list(SOURCES)},
+            "platform": {"type": "string"},
+            "site": {"type": "string"},
+            "since": {"type": "string", "description": "sent on or after this day, YYYY-MM-DD"},
+            "until": {"type": "string", "description": "sent before this day, YYYY-MM-DD"},
+            "limit": {"type": "integer", "description": f"at most {SEARCH_MAX}, default 10"},
+        },
+        "required": ["text"],
+        "additionalProperties": False,
+    },
+}
 
 
 class ClaudeError(Exception):
@@ -347,10 +376,10 @@ class Claude:
         return _description(answer.kind, answer.title, answer.topics, answer.summary,
                             answer.authors if document else (), document and answer.published)
 
-    async def answer(self, conversation, question, about, language, library, today, spoken=False):
+    async def answer(self, conversation, question, about, language, library, today, spoken=False, meanings=None):
         """La risposta a una domanda (spoken: fatta in un vocale), cercando in library
-        (coppermind): un Answer con il testo e i file da rimandare, o None se Claude non ne dà
-        una utilizzabile."""
+        (coppermind), anche per significato con meanings: un Answer con il testo e i file da
+        rimandare, o None se Claude non ne dà una utilizzabile."""
         prompt = {"language": language, "today": today, "conversation": conversation,
                   "question": question, "items": [view(i, ITEM_CONTENT_MAX) for i in about],
                   "items_kept": library.count()}
@@ -359,12 +388,13 @@ class Claude:
         messages = [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]
         chosen = []  # ciò che send_back sceglie: lo rimanda il codice, dopo il testo
         for _ in range(ANSWER_TURNS):
-            response = await self._create(system=ANSWER, tools=TOOLS, messages=messages, max_tokens=8192,
-                                          output_config={"effort": "medium"})
+            response = await self._create(system=ANSWER, tools=TOOLS + ([MEANING_TOOL] if meanings else []),
+                                          messages=messages, max_tokens=8192, output_config={"effort": "medium"})
             if response.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": response.content})
                 messages.append({"role": "user", "content": [
-                    _tool_result(block, library, chosen) for block in response.content if block.type == "tool_use"]})
+                    await _tool_result(block, library, chosen, meanings)
+                    for block in response.content if block.type == "tool_use"]})
                 continue
             text = "".join(b.text for b in response.content if b.type == "text").strip()
             if response.stop_reason == "end_turn" and not text and chosen:
@@ -472,15 +502,24 @@ def _description(kind, title, topics, summary, authors=(), published=False):
                           tuple(clean[:TOPICS_MAX]), _text(summary, SUMMARY_MAX), names, bool(published))
 
 
-def _tool_result(block, library, chosen):
+async def _tool_result(block, library, chosen, meanings=None):
     try:
-        content = json.dumps(_run_tool(block.name, block.input or {}, library, chosen), ensure_ascii=False)
-        return {"type": "tool_result", "tool_use_id": block.id, "content": content}
-    except (ValueError, TypeError) as err:
+        result = await _run_tool(block.name, block.input or {}, library, chosen, meanings)
+        return {"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result, ensure_ascii=False)}
+    except (ValueError, TypeError, MeaningError) as err:
         return {"type": "tool_result", "tool_use_id": block.id, "content": f"Error: {err}", "is_error": True}
 
 
-def _run_tool(name, args, library, chosen):
+async def _run_tool(name, args, library, chosen, meanings=None):
+    if name == "search_meaning" and meanings is not None:
+        _check_filters(args)
+        [vector] = await meanings.vectors([str(args.get("text") or "")], query=True)
+        found = library.by_meaning(
+            vector, meanings.name, kind=args.get("kind"), source=args.get("source"),
+            platform=(args.get("platform") or "").strip().lower() or None, site=args.get("site") or None,
+            since=_day(args.get("since")), until=_day(args.get("until")),
+            limit=max(1, min(int(args.get("limit") or 10), SEARCH_MAX)))
+        return {"items": [dict(view(i), similarity=round(s, 2)) for i, s in found if s >= MEANING_FLOOR]}
     if name == "send_back":
         files = [i for i in (library.get(int(n)) for n in args.get("ids") or ()) if i and i.source in FILES]
         for item in files:
@@ -499,9 +538,7 @@ def _run_tool(name, args, library, chosen):
                              for at, text in library.passages(int(args["id"]), str(args.get("text") or ""))]}
     if name != "search_items":
         raise ValueError(f"unknown tool {name}")
-    for key, allowed in (("kind", KINDS), ("source", SOURCES)):
-        if args.get(key) is not None and args[key] not in allowed:
-            raise ValueError(f"{key} must be one of {', '.join(allowed)}")
+    _check_filters(args)
     limit = max(1, min(int(args.get("limit") or 10), SEARCH_MAX))
     results = library.search(
         args.get("text"), kind=args.get("kind"), source=args.get("source"),
@@ -509,6 +546,12 @@ def _run_tool(name, args, library, chosen):
         since=_day(args.get("since")), until=_day(args.get("until")),
         words="any" if args.get("any_word") else "all", limit=limit)
     return {"total": results.total, "items": [view(i) for i in results.items]}
+
+
+def _check_filters(args):
+    for key, allowed in (("kind", KINDS), ("source", SOURCES)):
+        if args.get(key) is not None and args[key] not in allowed:
+            raise ValueError(f"{key} must be one of {', '.join(allowed)}")
 
 
 def _day(value):

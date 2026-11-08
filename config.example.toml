@@ -35,6 +35,12 @@ model = "claude-haiku-5-5"
 model = "models/ggml-large-v3-turbo-q5_0.bin"
 threads = 8
 
+# Search by meaning: llama-server computes the embeddings on this computer, on the processor.
+# scripts/setup-embeddings.sh downloads the model into models/.
+[embeddings]
+model = "models/Qwen3-Embedding-0.6B-Q8_0.gguf"
+threads = 4
+
 # Reactions set on your messages, instead of replies; only some emoji are accepted, see
 # https://core.telegram.org/bots/api#reactiontypeemoji
 [reactions]

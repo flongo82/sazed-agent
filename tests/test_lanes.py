@@ -16,12 +16,14 @@ from sazed_agent.coppermind import Coppermind, Draft
 from sazed_agent.documents import Documents
 from sazed_agent.journal import Journal
 from sazed_agent.lanes import Processor, lane_for
+from sazed_agent.meaning import MeaningError
 from sazed_agent.reader import Extract, Reader, ReadError
 from sazed_agent.telegram import Telegram, TelegramError
 from tests import fake_claude
 from tests.fake_claude import interpretation, tool
 from tests.fake_telegram import TOKEN, FakeTelegram, url_entities
 from tests.fake_web import FakeWeb, allow_all
+from tests.fake_meanings import FakeMeanings
 from tests.files import pdf
 
 ARTICLE = ("<title>Torta di mele</title><article><p>Tre uova, zucchero, farina e mele: la torta della domenica, "
@@ -105,7 +107,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.stop = asyncio.Event()
 
     def processor(self, token=TOKEN, delays=(0.05, 0.1), claude=None, reads=False, read_wait=5.0, listener=None,
-                  videos=None, listen_wait=5.0, documents=None, lookup=None, big_files=None):
+                  videos=None, listen_wait=5.0, documents=None, lookup=None, big_files=None, meanings=None):
         reader = None
         if reads:
             reader = Reader(transport=self.web.transport, allow=allow_all)
@@ -114,7 +116,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
                          Reactions("👍", "😢", "🤷"), delays, typing_interval=0.05, idle_wait=5.0,
                          config_pause=30.0, memory=self.memory, claude=claude, reader=reader, read_wait=read_wait,
                          listener=listener, videos=videos, listen_wait=listen_wait, documents=documents,
-                         lookup=lookup, big_files=big_files)
+                         lookup=lookup, big_files=big_files, meanings=meanings)
 
     def with_claude(self, key=fake_claude.KEY, **options):
         """Un finto Claude, e il processore che lo usa."""
@@ -623,6 +625,31 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replies, ["Ciao Ada, eccolo."])
         self.assertEqual(len(self.telegram.ok_calls("copyMessage")), 1)
         self.assertEqual(len(self.claude.of("answer")), 2)  # Claude non si richiama
+
+    # --- significati ---
+
+    async def test_what_is_kept_gets_its_meaning_once_read(self):
+        self.web.page("https://example.com/torta", ARTICLE)
+        meanings = FakeMeanings()
+        p = self.with_claude(reads=True, meanings=meanings)
+        self.claude.on("interpret", lambda m: interpretation(note=m["current"]["words"]))
+        self.claude.on("describe", lambda m: fake_claude.description("recipe", "Torta di mele", ["mele"], "Soffice."))
+        await self.handle(update(1, "https://example.com/torta"), update(2, "comprare il riso"), processor=p)
+        await self.until(lambda: self.journal.db.execute("SELECT COUNT(*) FROM meanings").fetchone()[0] == 2)
+        cards = [text for texts, query in meanings.calls for text in texts]
+        self.assertTrue(any(c.startswith("Title: Torta di mele") and "Summary: Soffice." in c for c in cards))
+        self.assertTrue(any("Note: comprare il riso" in c for c in cards))
+        self.assertFalse(any(query for _, query in meanings.calls))
+
+    async def test_without_llama_server_the_rest_goes_on(self):
+        meanings = FakeMeanings(fail=MeaningError("llama-server non è partito"))
+        p = self.with_claude(meanings=meanings)
+        self.claude.on("interpret", lambda m: interpretation(note=m["current"]["words"]))
+        with self.assertLogs("sazed_agent.lanes", "WARNING") as logs:
+            await self.handle(update(1, "comprare il riso"), processor=p)
+            await self.until(lambda: meanings.calls)
+        self.assertEqual(self.memory.count(), 1)
+        self.assertIn("significati non calcolati: llama-server non è partito", "\n".join(logs.output))
 
     async def test_a_question_does_not_wait_forever_for_a_reading(self):
         self.web.route("https://example.com/giu", 503)

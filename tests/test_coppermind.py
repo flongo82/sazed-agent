@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sazed_agent.coppermind import Coppermind, CoppermindError, Draft, Link, parse_link
 from sazed_agent.journal import Journal, JournalError
+from tests.fake_meanings import vector
 
 
 def day(y, m, d):
@@ -245,8 +246,16 @@ class Reading(Base):
             self.memory.read_done(out.item.id, "pending")
 
 
+def as_version_3(db):
+    """Riporta il catalogo com'era alla versione 3: senza i significati."""
+    db.execute("DROP TRIGGER meanings_delete")
+    db.execute("DROP TABLE meanings")
+    db.execute("PRAGMA user_version = 3")
+
+
 def as_version_2(db):
     """Riporta il catalogo com'era alla versione 2: senza autori né lettura completa, con l'indice di allora."""
+    as_version_3(db)
     for name in ("items_fts_insert", "items_fts_delete", "items_fts_update"):
         db.execute(f"DROP TRIGGER {name}")
     db.execute("DROP TABLE items_fts")
@@ -281,7 +290,7 @@ class Versions(unittest.TestCase):
         journal.record(7, update(1), "acquisition")
         self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 0)
         Coppermind(journal.db)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 4)
         self.assertEqual(journal.get(1).state, "received")
         Coppermind(journal.db)  # una seconda apertura non cambia nulla
 
@@ -297,7 +306,7 @@ class Versions(unittest.TestCase):
             db.execute(f"ALTER TABLE items DROP COLUMN {column}")
         db.execute("PRAGMA user_version = 1")
         memory = Coppermind(db, clock=lambda: 100.0)
-        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
         item = memory.to_read(["link"])
         self.assertEqual((item.note, item.extraction, item.read_error), ("vecchio", "pending", None))
 
@@ -309,11 +318,21 @@ class Versions(unittest.TestCase):
         memory.read_done(old.id, "partial", title="Il pozzo dell'ascensione")
         as_version_2(journal.db)
         memory = Coppermind(journal.db, clock=lambda: 100.0)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 4)
         self.assertEqual(memory.search("pozzo").total, 1)  # l'indice ricostruito trova ciò che c'era
         memory.read_done(old.id, "partial", authors=["Brandon Sanderson"])
         self.assertEqual([i.id for i in memory.search("sanderson").items], [old.id])
         self.assertEqual((memory.get(old.id).authors, memory.get(old.id).read_full), (["Brandon Sanderson"], False))
+
+    def test_a_catalogue_of_version_3_learns_meanings(self):
+        journal = Journal(self.dir / "coppermind.db")
+        self.addCleanup(journal.close)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        [note] = [o.item for o in memory.save(42, 10, 1, [Draft("note", note="riso")])]
+        as_version_3(journal.db)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual([i.id for i in memory.to_mean("modello")], [note.id])
 
     def test_a_database_from_a_newer_version_is_refused(self):
         journal = Journal(self.dir / "coppermind.db")
@@ -354,6 +373,40 @@ class Documents(Base):
         self.assertTrue(all(len(text) <= 1500 for _, text in self.memory.passages(doc.id, "parole")))
         self.assertEqual(self.memory.passages(doc.id, "di"), [])  # parole troppo corte
         self.assertEqual(self.memory.passages(999, "lord"), [])
+
+
+class Meanings(Base):
+    def test_items_are_meant_once_read_and_again_when_they_change(self):
+        [link] = [o.item for o in self.save(10, Draft("link", url="https://example.com/torta"))]
+        [note] = [o.item for o in self.save(11, Draft("note", note="comprare il riso"))]
+        self.assertEqual([i.id for i in self.memory.to_mean("m")], [note.id])  # il link aspetta la lettura
+        self.memory.read_done(link.id, "complete", title="Torta di mele")
+        for item in self.memory.to_mean("m"):
+            self.memory.set_meaning(item.id, "m", vector(item.title or item.note), item.updated_at)
+        self.assertEqual(self.memory.to_mean("m"), [])
+        self.assertEqual(len(self.memory.to_mean("altro-modello")), 2)  # un altro modello ricomincia
+        self.now += 10
+        self.memory.annotate(link.id, "per domenica")
+        self.assertEqual([i.id for i in self.memory.to_mean("m")], [link.id])
+        self.memory.set_meaning(999, "m", vector("niente"), 0)  # un elemento che non c'è: nulla
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM meanings").fetchone()[0], 2)
+        self.save(11)  # la nota sparisce, e il suo significato con lei
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM meanings").fetchone()[0], 1)
+
+    def test_the_closest_items_come_first_within_the_filters(self):
+        texts = {"torta di mele della nonna": "recipe", "torta salata di verdure": "recipe",
+                 "contratto di affitto": "document"}
+        for n, (text, kind) in enumerate(texts.items()):
+            [item] = [o.item for o in self.save(20 + n, Draft("note", note=text))]
+            self.classify(item.id, kind=kind)
+            self.memory.set_meaning(item.id, "m", vector(text), self.memory.get(item.id).updated_at)
+        found = self.memory.by_meaning(vector("una torta di mele"), "m")
+        self.assertEqual([i.note for i, _ in found][:2], ["torta di mele della nonna", "torta salata di verdure"])
+        self.assertGreater(found[0][1], found[1][1])
+        self.assertEqual([i.note for i, _ in self.memory.by_meaning(vector("torta"), "m", kind="document")],
+                         ["contratto di affitto"])
+        self.assertEqual(len(self.memory.by_meaning(vector("torta"), "m", limit=1)), 1)
+        self.assertEqual(self.memory.by_meaning(vector("torta"), "altro-modello"), [])
 
 
 class Search(Base):

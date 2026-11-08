@@ -10,8 +10,10 @@ from pathlib import Path
 from sazed_agent.claude import Answer, Claude, ClaudeError, Classification, Interpretation, view
 from sazed_agent.coppermind import Coppermind, Draft
 from sazed_agent.journal import Journal
+from sazed_agent.meaning import MeaningError
 from sazed_agent.reader import Extract
 from tests.fake_claude import KEY, FakeClaude, description, images, interpretation, tool
+from tests.fake_meanings import FakeMeanings, vector
 
 
 class ClaudeTest(unittest.IsolatedAsyncioTestCase):
@@ -229,6 +231,35 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         result = json.loads(self.fake.of("answer")[1]["body"]["messages"][2]["content"][0]["content"])
         self.assertEqual((result["will_send_after_reply"], result["not_files"]), ([self.photo.id], [self.link.id, 999]))
         self.assertIn("send back", self.fake.of("answer")[0]["body"]["system"])
+
+    async def test_an_answer_can_search_by_meaning_when_the_model_is_there(self):
+        meanings = FakeMeanings()
+        for item, text in ((self.link, "tiramisù dolce al cucchiaio mascarpone"), (self.old, "contratto di affitto")):
+            self.memory.read_done(item.id, "complete", title=text)
+            self.memory.set_meaning(item.id, meanings.name, vector(text), self.memory.get(item.id).updated_at)
+        turns = iter([tool("search_meaning", {"text": "un dolce al cucchiaio", "limit": 5}),
+                      tool("search_meaning", {"text": "x", "kind": "romanzo"}), "il tiramisù."])
+        self.fake.on("answer", lambda messages: next(turns))
+        answer = await self.claude.answer([], "che dolci ho?", [], "it", self.memory, "2026-11-08", meanings=meanings)
+        self.assertEqual(answer.text, "il tiramisù.")
+        requests = self.fake.of("answer")
+        self.assertIn("search_meaning", {t["name"] for t in requests[0]["body"]["tools"]})
+        found = json.loads(requests[1]["body"]["messages"][2]["content"][0]["content"])["items"]
+        self.assertEqual(found[0]["id"], self.link.id)
+        self.assertTrue(all(0.3 <= i["similarity"] <= 1 for i in found))
+        self.assertTrue(requests[2]["body"]["messages"][4]["content"][0]["is_error"])
+        self.assertEqual(meanings.calls[0], (["un dolce al cucchiaio"], True))  # come domanda
+
+    async def test_without_the_model_there_is_no_search_by_meaning(self):
+        await self.claude.answer([], "che dolci ho?", [], "it", self.memory, "2026-11-08")
+        self.assertNotIn("search_meaning", {t["name"] for t in self.fake.of("answer")[0]["body"]["tools"]})
+        turns = iter([tool("search_meaning", {"text": "dolci"}), "niente."])
+        self.fake.on("answer", lambda messages: next(turns))
+        broken = FakeMeanings(fail=MeaningError("llama-server non è partito"))
+        await self.claude.answer([], "dolci?", [], "it", self.memory, "2026-11-08", meanings=broken)
+        result = self.fake.of("answer")[-1]["body"]["messages"][2]["content"][0]
+        self.assertTrue(result["is_error"])
+        self.assertIn("non è partito", result["content"])
 
     async def test_a_wrong_tool_input_is_an_error_for_claude_not_for_the_agent(self):
         turns = iter([tool("search_items", {"kind": "romanzo"}), tool("get_item", {"id": 999}), "niente."])

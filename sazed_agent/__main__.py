@@ -25,6 +25,7 @@ from .lanes import Processor, lane_for
 from .link import Replaced, WorkerLink, agent_url
 from .listener import Listener
 from .lookup import Lookup
+from .meaning import Meanings
 from .mtproto import BigFiles
 from .reader import Reader
 from .telegram import Telegram
@@ -75,6 +76,7 @@ def check(config_path):
         print(f"Claude: non ancora pronto ({err}).")
     print(f"Whisper: {listening(config)}.")
     print(f"File oltre i 20 MB: {big_files_status(config)}.")
+    print(f"Ricerca per significato: {meaning_status(config)}.")
 
 
 def big_files_status(config):
@@ -99,7 +101,8 @@ def run(config_path):
                                   config.language, config.reactions, config.retry_delays,
                                   memory=Coppermind(journal.db), claude=claude_for(config), reader=reader,
                                   listener=listener, videos=Videos(listener), documents=Documents(),
-                                  lookup=Lookup(reader), big_files=big_files_for(config))
+                                  lookup=Lookup(reader), big_files=big_files_for(config),
+                                  meanings=meanings_for(config))
             link = WorkerLink(url, agent_token, journal, lane_for, config.ping_interval,
                               config.pong_timeout, on_recorded=processor.notify)
             asyncio.run(serve(link, processor))
@@ -123,6 +126,22 @@ def listening(config):
     if not config.whisper.model.is_file():
         return f"manca il modello {config.whisper.model}: lancia scripts/setup-whisper.sh"
     return f"modello {config.whisper.model.name}, {config.whisper.threads} processori"
+
+
+def meanings_for(config):
+    """Chi calcola i significati, se il modello c'è; senza, si cerca solo per parole."""
+    if config.embeddings is None or not config.embeddings.model.is_file():
+        log.warning("Ricerca per significato: %s", meaning_status(config))
+        return None
+    return Meanings(config.embeddings.model, config.embeddings.threads)
+
+
+def meaning_status(config):
+    if config.embeddings is None:
+        return "non configurata: lancia scripts/setup-embeddings.sh"
+    if not config.embeddings.model.is_file():
+        return f"manca il modello {config.embeddings.model.name}: lancia scripts/setup-embeddings.sh"
+    return f"modello {config.embeddings.model.name}, {config.embeddings.threads} processori"
 
 
 def big_files_for(config):
@@ -162,8 +181,9 @@ async def serve(link, processor, stop=None):
         await lanes
         if getattr(processor, "reader", None) is not None:
             await processor.reader.close()
-        if getattr(processor, "big_files", None) is not None:
-            await processor.big_files.close()
+        for helper in ("big_files", "meanings"):
+            if getattr(processor, helper, None) is not None:
+                await getattr(processor, helper).close()
         log.info("agente fermato")
 
 

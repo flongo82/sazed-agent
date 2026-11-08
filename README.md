@@ -44,15 +44,16 @@ spoken in a voice message count like typed ones, so a question asked aloud gets 
 From what was read, Claude gives each item a kind, a title, its authors, topics and a short
 summary, which coppermind indexes. A source that cannot be read gets 🤷 on its message.
 
-**Answers questions** in the chat, looking into coppermind with read-only tools (exact
-filters and words, one item with its text, the passages of a long text). Ask for a file you
+**Answers questions** in the chat, looking into coppermind with read-only tools: exact
+filters and words, meaning (so "desserts that need no oven" finds a tiramisù, even saved with
+other words or in another language), one item with its text, the passages of a long text. Ask for a file you
 kept ("send me the rent contract") and, after the answer, the bot copies its original message
 back into the chat.
 
 ## Status
 
-Working end to end with `sazed-bot`. Not there yet: search by meaning (embeddings), the place
-and date of photos (EXIF), and running as a system service.
+Working end to end with `sazed-bot`. Not there yet: the place and date of photos (EXIF), and
+running as a system service.
 
 ## Getting started
 
@@ -66,6 +67,8 @@ scripts/setup-claude.sh   # asks for a Claude API key from the Claude Console, c
                           # the API and saves it; the model is chosen in config.toml
 scripts/setup-whisper.sh  # downloads the whisper.cpp model into models/ (about 574 MB) and
                           # checks it against its known SHA-256
+scripts/setup-embeddings.sh  # downloads the embedding model into models/ (about 639 MB) and
+                          # checks it against its known SHA-256
 scripts/setup-mtproto.sh  # asks for the api_id and api_hash of an application created on
                           # my.telegram.org, to download files beyond the Bot API's 20 MB
 scripts/build.sh          # builds the sazed-agent image (podman rmi sazed-agent removes it)
@@ -76,9 +79,10 @@ scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev,
                           # wrangler from ../sazed-bot (read-only) and no network access
 ```
 
-Each of Claude, Whisper and MTProto is optional: without Claude the words go with the items
-or become notes, and nothing is described or answered; without the Whisper model, voice
-messages and videos are kept and wait to be heard; without MTProto, files beyond 20 MB get 🤷.
+Each of Claude, Whisper, the embedding model and MTProto is optional: without Claude the
+words go with the items or become notes, and nothing is described or answered; without the
+Whisper model, voice messages and videos are kept and wait to be heard; without the embedding
+model, search goes by words only; without MTProto, files beyond 20 MB get 🤷.
 
 An API key is not tied to a model: the agent names the model on every request, from the
 `[claude]` section of `config.toml` (Claude Haiku by default, which is plenty for
@@ -107,6 +111,7 @@ stop it here first, then copy this folder with its `data/` and `secrets/`.
 | Documents | poppler for PDFs (the first page as an image, for scans); EPUB, DOCX and ODT with Python's standard library, with limits against archives that unroll beyond measure |
 | Large files | MTProto (Telethon) with the bot's token, up to 2 GB, four pieces at a time |
 | coppermind | A single SQLite file, shared with the journal so that saving an item and moving its message forward are one transaction: exact filters and full-text search (FTS5) |
+| Meaning | One vector per item from its card (title, authors, topics, summary, note, the beginning of what was read), computed by Qwen3-Embedding-0.6B in `llama-server` on the processor, at low priority, over a private UNIX socket; compared with numpy |
 
 Only links, metadata and extracted text are kept: the sources stay where they are, and your
 files stay in the Telegram chat. Downloaded files live in a temporary folder that disappears

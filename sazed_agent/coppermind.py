@@ -21,7 +21,10 @@ punti che parlano di qualcosa.
 
 Ricerca: filtri esatti (tipo, piattaforma, sito, ingresso, date), che danno elenchi completi e
 il loro totale, più il testo con FTS5 (senza badare agli accenti, anche per inizio di parola).
-La ricerca per significato arriverà con gli embedding calcolati sulla GPU.
+E per significato (by_meaning): ogni elemento letto ha un vettore, calcolato fuori da qui
+(to_mean, set_meaning) e legato al modello che l'ha prodotto; quando l'elemento cambia, il suo
+vettore va ricalcolato. Il confronto è diretto, con numpy: per decine di migliaia di elementi
+basta, senza indici vettoriali.
 """
 
 import json
@@ -30,10 +33,12 @@ import sqlite3
 import time
 import unicodedata
 from dataclasses import dataclass
+
+import numpy
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-VERSION = 3
+VERSION = 4
 SOURCES = ("note", "link", "photo", "video", "video_note", "voice", "audio", "document")
 FILES = SOURCES[2:]
 EXTRACTIONS = ("pending", "complete", "partial", "failed", "unavailable")
@@ -86,6 +91,15 @@ CREATE TRIGGER IF NOT EXISTS items_fts_delete AFTER DELETE ON items BEGIN
   INSERT INTO items_fts (items_fts, rowid, title, authors, topics, summary, note, content, url)
   VALUES ('delete', old.id, old.title, old.authors, old.topics, old.summary, old.note, old.content, old.url);
 END;
+CREATE TABLE IF NOT EXISTS meanings (
+  item_id     INTEGER PRIMARY KEY,
+  model       TEXT    NOT NULL,   -- il modello che ha calcolato il vettore
+  vector      BLOB    NOT NULL,   -- float32, normalizzato
+  updated_at  REAL    NOT NULL    -- items.updated_at quando si è calcolato: se l'elemento cambia, si ricalcola
+);
+CREATE TRIGGER IF NOT EXISTS meanings_delete AFTER DELETE ON items BEGIN
+  DELETE FROM meanings WHERE item_id = old.id;
+END;
 CREATE TRIGGER IF NOT EXISTS items_fts_update AFTER UPDATE OF title, authors, topics, summary, note, content, url
 ON items BEGIN
   INSERT INTO items_fts (items_fts, rowid, title, authors, topics, summary, note, content, url)
@@ -105,6 +119,7 @@ MIGRATIONS = {
         "ALTER TABLE items ADD COLUMN read_full INTEGER NOT NULL DEFAULT 0",
         "DROP TRIGGER items_fts_insert", "DROP TRIGGER items_fts_delete", "DROP TRIGGER items_fts_update",
         "DROP TABLE items_fts"),
+    4: (),  # la tabella dei significati, nuova: la crea lo schema
 }
 
 # Peso di ogni colonna di items_fts nell'ordinamento per pertinenza (bm25).
@@ -180,6 +195,7 @@ class Item:
     saved_at: float
     read_error: str | None = None
     read_full: bool = False    # l'utente ha chiesto di leggerlo tutto
+    updated_at: float = 0.0    # l'ultimo cambiamento: il significato calcolato prima va rifatto
 
 
 @dataclass(frozen=True)
@@ -461,23 +477,7 @@ class Coppermind:
         """
         if words not in ("all", "any"):
             raise ValueError(f"words deve essere \"all\" o \"any\", non {words!r}")
-        where, params = [], []
-        for column, value in (("kind", kind), ("platform", platform), ("source", source),
-                              ("extraction", extraction)):
-            if value is not None:
-                values = (value,) if isinstance(value, str) else tuple(value)
-                where.append(f"items.{column} IN ({', '.join('?' * len(values))})")
-                params += values
-        if site:
-            site = _bare_host(site.strip().lower())
-            where.append("(items.site = ? OR substr(items.site, -?) = ?)")
-            params += [site, len(site) + 1, "." + site]
-        if since is not None:
-            where.append("items.sent_at >= ?")
-            params.append(since)
-        if until is not None:
-            where.append("items.sent_at < ?")
-            params.append(until)
+        where, params = _filters(kind, platform, site, source, extraction, since, until)
         tables, order = "items", "items.sent_at DESC, items.id DESC"
         if text is not None and text.strip():
             match = _match(text, words)
@@ -492,6 +492,42 @@ class Coppermind:
         rows = self.db.execute(f"SELECT items.* FROM {tables}{clause} ORDER BY {order} LIMIT ? OFFSET ?",
                                (*params, -1 if limit is None else limit, offset)).fetchall()
         return Results([_item(r) for r in rows], total)
+
+    def to_mean(self, model, limit=8):
+        """Gli elementi di cui calcolare il significato con questo modello: già letti (o note) e
+        senza un vettore, o con uno di un altro modello o di prima dell'ultimo cambiamento."""
+        rows = self.db.execute(
+            "SELECT items.* FROM items LEFT JOIN meanings ON meanings.item_id = items.id"
+            " WHERE items.extraction != 'pending' AND (meanings.item_id IS NULL OR meanings.model != ?"
+            " OR meanings.updated_at < items.updated_at) ORDER BY items.id LIMIT ?", (model, limit)).fetchall()
+        return [_item(r) for r in rows]
+
+    def set_meaning(self, item_id, model, vector, updated_at):
+        """Il vettore di un elemento com'era a updated_at (il suo items.updated_at). Se nel frattempo
+        l'elemento è sparito, nulla."""
+        with transaction(self.db):
+            if self.db.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone():
+                self.db.execute(
+                    "INSERT INTO meanings (item_id, model, vector, updated_at) VALUES (?, ?, ?, ?)"
+                    " ON CONFLICT(item_id) DO UPDATE SET model = excluded.model, vector = excluded.vector,"
+                    " updated_at = excluded.updated_at",
+                    (item_id, model, numpy.asarray(vector, dtype=numpy.float32).tobytes(), updated_at))
+
+    def by_meaning(self, vector, model, *, kind=None, platform=None, site=None, source=None, since=None,
+                   until=None, limit=10):
+        """Gli elementi più vicini per significato a un vettore (normalizzato, dello stesso modello),
+        fra quelli che rispondono ai filtri, come (elemento, somiglianza da -1 a 1), i più simili
+        per primi."""
+        where, params = _filters(kind, platform, site, source, None, since, until)
+        rows = self.db.execute(
+            "SELECT items.*, meanings.vector AS meaning FROM items JOIN meanings ON meanings.item_id = items.id"
+            f" WHERE meanings.model = ?{''.join(' AND ' + w for w in where)}", (model, *params)).fetchall()
+        if not rows:
+            return []
+        matrix = numpy.frombuffer(b"".join(r["meaning"] for r in rows), dtype=numpy.float32).reshape(len(rows), -1)
+        scores = matrix @ numpy.asarray(vector, dtype=numpy.float32)
+        best = numpy.argsort(-scores)[:limit]
+        return [(_item(rows[i]), float(scores[i])) for i in best]
 
     def _holder(self, chat_id, message_id, origin):
         """L'elemento che ha già questa origine, o la nota di questo messaggio."""
@@ -608,7 +644,29 @@ def _item(row):
         latitude=row["latitude"], longitude=row["longitude"], taken_at=row["taken_at"],
         media=json.loads(row["media"]) if row["media"] else {}, sent_at=row["sent_at"],
         saved_at=row["saved_at"], read_error=row["read_error"], read_full=bool(row["read_full"]),
+        updated_at=row["updated_at"],
     )
+
+
+def _filters(kind, platform, site, source, extraction, since, until):
+    """Le condizioni SQL dei filtri esatti, con i loro parametri."""
+    where, params = [], []
+    for column, value in (("kind", kind), ("platform", platform), ("source", source), ("extraction", extraction)):
+        if value is not None:
+            values = (value,) if isinstance(value, str) else tuple(value)
+            where.append(f"items.{column} IN ({', '.join('?' * len(values))})")
+            params += values
+    if site:
+        site = _bare_host(site.strip().lower())
+        where.append("(items.site = ? OR substr(items.site, -?) = ?)")
+        params += [site, len(site) + 1, "." + site]
+    if since is not None:
+        where.append("items.sent_at >= ?")
+        params.append(since)
+    if until is not None:
+        where.append("items.sent_at < ?")
+        params.append(until)
+    return where, params
 
 
 def _plain(text):
