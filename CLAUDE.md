@@ -54,11 +54,11 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
   richiesta; PDF con poppler, EPUB, DOCX e ODT con la libreria standard e limiti sugli archivi
 - `sazed_agent/lookup.py`: le schede delle opere pubblicate da fonti libere (Open Library,
   Crossref, Wikipedia), con uno User-Agent che dice chi chiama
-- `sazed_agent/videos.py`: i video di YouTube con yt-dlp (senza configurazione, cookie, cache
-  né playlist), e i reel di Instagram a cascata: prima didascalia e copertina, il video (senza
-  account; con i cookie facoltativi di un account secondario, passati come copia) solo se non
-  bastano. yt-dlp viene da pip (2026.10.21), perché quello di apt è troppo vecchio per Instagram: descrizione, sottotitoli scritti o automatici della lingua parlata (mai le
-  traduzioni), altrimenti l'audio per Whisper; gli errori non dicono quale video
+- `sazed_agent/videos.py`: i video con yt-dlp (senza configurazione, cache né playlist; gli
+  errori non dicono quale video). Di YouTube descrizione, sottotitoli scritti o automatici della
+  lingua parlata (mai le traduzioni), altrimenti l'audio per Whisper; dei reel di Instagram il
+  video (senza account; con i cookie facoltativi di un account secondario, passati come copia),
+  che le corsie chiedono solo se didascalia e copertina non bastano
 - `sazed_agent/mtproto.py`: i file oltre i 20 MB via MTProto (Telethon, token del bot, senza
   aggiornamenti), a pezzi da 512 KB in quattro parti insieme; la sessione in `secrets/mtproto/`
 - `sazed_agent/meaning.py`: il significato dei testi: `llama-server` (llama.cpp) con il modello
@@ -85,13 +85,14 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
   (fuori dalla scoperta di unittest) prova l'agente contro il vero codice del Worker
 - `spikes/`: esperimenti contro il vero Telegram, lanciati a mano e fuori dai test.
   `mtproto.py` scarica via MTProto un file oltre i 20 MB con il webhook del Worker attivo
-- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg, whisper.cpp, yt-dlp, poppler-utils e llama.cpp da apt), build,
+- `Containerfile`, `scripts/`: immagine Podman (con ffmpeg, whisper.cpp, poppler-utils, llama.cpp e tesseract da apt), build,
   test, setup
 - `models/`: i modelli di whisper.cpp e di embedding (esclusi da git, montati in sola lettura),
   scaricati e verificati con la loro impronta da `scripts/setup-whisper.sh` e
   `scripts/setup-embeddings.sh`
-- `pip-requirements.txt`: ciò che apt non ha, con versione e hash (oggi solo `jiter`, che
-  `python3-anthropic` di Ubuntu importa senza dichiararlo)
+- `pip-requirements.txt`: ciò che apt non ha, con versione e hash: `jiter`, che
+  `python3-anthropic` di Ubuntu importa senza dichiararlo, e `yt-dlp`, perché quello di apt è
+  troppo vecchio per Instagram
 
 ## Comandi
 
