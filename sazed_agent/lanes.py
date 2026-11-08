@@ -24,8 +24,11 @@ le domande che non aspettano dietro una lettura lunga.
   prime pagine; se non dicono di che cosa parla un'opera pubblicata, si cerca la sua scheda in
   un catalogo libero. Tutto il testo solo se l'utente lo chiede: la richiesta è una domanda,
   che ha risposta a lettura finita.
-  Dal contenuto Claude ricava tipo, titolo, argomenti e riassunto. Una fonte che non si legge
-  mette 🤷 sul messaggio.
+  Dal contenuto Claude ricava tipo, titolo, argomenti e riassunto, e legge le scritte nelle
+  immagini (una foto, i fotogrammi di un video), che si custodiscono con il testo. Una fonte che
+  non si legge mette 🤷 sul messaggio. Se non si legge, o se da ciò che si è letto non si capisce
+  di che cosa parla, sazed lo dice e chiede due parole, a meno che l'utente non le abbia già
+  scritte (la nota dell'elemento).
 
 Ogni passo è scritto nel registro (o in coppermind, per la lettura) prima del successivo, così
 un arresto in qualunque punto riprende dallo stato registrato; salvataggio e cambio di stato
@@ -234,6 +237,11 @@ class Processor:
         else:
             self.journal.advance(entry.update_id, "done")
             log.info("elemento %s completato, senza bisogno di risposta", entry.update_id)
+        # ultimo, dopo ogni cambio di stato: chi era letto prima che le parole fossero salvate
+        for item_id, reason in (self.journal.get(entry.update_id).unknown or {}).items():
+            item = self.memory.get(int(item_id))
+            if item is not None:
+                await self._tell_unknown(entry, item, reason)
 
     async def _resolve(self, reading):
         """Gli indirizzi veri dei link brevi. Se un rimando non si segue, il link resta com'è."""
@@ -318,7 +326,8 @@ class Processor:
         past = self.journal.recent(entry.chat_id, entry.received_at, entry.received_at - THREAD_WINDOW,
                                    THREAD_LIMIT)
         if reading.reply_to and all(e.message_id != reading.reply_to for e in past):
-            replied = self.journal.of_message(entry.chat_id, reading.reply_to)
+            replied = (self.journal.of_message(entry.chat_id, reading.reply_to)
+                       or self.journal.of_reply(entry.chat_id, reading.reply_to))  # una risposta a sazed
             if replied is not None and replied.received_at < entry.received_at:
                 past.append(replied)
         latest = {}
@@ -463,6 +472,7 @@ class Processor:
                         "si riproverà" if outcome == "pending" else outcome)
             if outcome != "pending":
                 await self._react(item.chat_id, item.message_id, self.reactions.unreadable)
+                await self._say_unknown(item, "unreadable")
                 self._read_over()
             return
         if not item.read_full and getattr(self.memory.get(item.id), "read_full", False):
@@ -484,12 +494,46 @@ class Processor:
                     return
                 log.warning("elemento %s custodito senza descrizione: %s", item.id, err)
         d = description
-        self.memory.read_done(item.id, "complete" if extract.complete else "partial", content=extract.text,
+        content = "\n\n".join(p for p in (extract.text, d and d.image_text and f"Text in the images:\n{d.image_text}")
+                              if p) or None
+        self.memory.read_done(item.id, "complete" if extract.complete else "partial", content=content,
                               title=(d and d.title) or extract.title, kind=d and d.kind,
                               topics=d.topics if d else (), summary=d and d.summary, authors=d.authors if d else ())
         log.info("elemento %s letto (%s)%s", item.id, "completo" if extract.complete else "in parte",
                  "" if d else ", senza descrizione")
+        if not (extract.text or extract.title or extract.images) or d is not None and not d.useful:
+            await self._say_unknown(item, "unknown")  # non si è letto nulla, o nulla che dica qualcosa
         self._read_over()
+
+    async def _say_unknown(self, item, reason):
+        """Di un elemento non si sa di che cosa parla (reason: "unknown" se si è letto ma non dice
+        nulla, "unreadable" se non si legge). Se le parole del suo messaggio non sono ancora salvate,
+        l'avviso lo decide l'ingresso dopo averle salvate (lo si annota nel registro, senza attese
+        in mezzo: nessuna corsa); altrimenti si decide adesso."""
+        entry = self.journal.of_message(item.chat_id, item.message_id)
+        if entry is None:
+            return
+        if entry.state in INTAKE:
+            self.journal.add_unknown(entry.update_id, item.id, reason)
+            return
+        await self._tell_unknown(entry, item, reason)
+
+    async def _tell_unknown(self, entry, item, reason):
+        """Dice all'utente che di un elemento non si sa di che cosa parla e gli chiede due parole.
+        Non se le aveva già scritte lui: la nota basta a ritrovarlo. L'avviso entra nel filo, come
+        risposta al messaggio dell'elemento, così le parole che seguono si legano a lui."""
+        current = self.memory.get(item.id)
+        if current is None or current.note:
+            return
+        t, hello = self._voice(entry)
+        try:
+            reply_id = await self.telegram.send_message(item.chat_id, f"{hello}, {t[reason]}", reply_to=item.message_id)
+        except TelegramError as err:
+            log.warning("elemento %s: avviso di contenuto incomprensibile non inviato: %s", item.id, err)
+            return
+        if entry.reply_message_id is None:
+            self.journal.set_reply(entry.update_id, reply_id, t[reason])
+        log.info("elemento %s: non si capisce di che cosa parla, chieste due parole all'utente", item.id)
 
     async def _describe(self, item, extract):
         """La descrizione di Claude. Di un'opera pubblicata letta solo in parte, se le prime pagine

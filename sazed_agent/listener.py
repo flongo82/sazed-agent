@@ -1,7 +1,9 @@
-"""L'ascolto dei file: vocali, audio e video diventano testo, e un video anche qualche fotogramma.
+"""L'ascolto dei file: vocali, audio e video diventano testo, e un video anche i suoi fotogrammi.
 
 - ffprobe dice che cosa c'è nel file (audio, immagini, durata);
-- ffmpeg ne prende l'audio, a 16 kHz, e i fotogrammi, a intervalli regolari;
+- ffmpeg ne prende l'audio, a 16 kHz, e i fotogrammi in cui l'immagine cambia (una scritta che
+  compare, una scena nuova): chi descrive (Claude) ne legge le scritte, che in un video muto o
+  senza descrizione sono spesso tutto ciò che dice;
 - whisper.cpp trascrive, sul processore e con priorità bassa, per non rallentare il computer.
 
 Tutto avviene in una cartella temporanea che sparisce subito dopo: del file resta solo ciò che
@@ -19,8 +21,9 @@ from pathlib import Path
 from .reader import Extract, ReadError
 
 MAX_SECONDS = 30 * 60   # si trascrive al più la prima mezz'ora
-FRAMES = 4              # fotogrammi di un video, presi a intervalli regolari
-FRAME_WIDTH = 768       # abbastanza per leggere le scritte, poco per l'API di Claude
+MAX_FRAMES = 30         # fotogrammi di un video al più, distribuiti su tutto il video
+FRAME_RATE = 2          # quante volte al secondo si guarda se l'immagine è cambiata
+FRAME_WIDTH = 640       # abbastanza per leggere le scritte, poco per l'API di Claude
 PROBE_TIMEOUT = 30
 NICE = 10               # la priorità della trascrizione: il computer resta di chi lo usa
 
@@ -65,19 +68,24 @@ class Listener:
         return text or None
 
     async def _frames(self, path, work, duration):
-        moments = [duration * (i + 0.5) / FRAMES for i in range(FRAMES)] if duration else [0.0]
-        frames = []
-        for i, moment in enumerate(moments):
-            frame = work / f"frame{i}.jpg"
-            try:
-                await run_program([self.ffmpeg, "-nostdin", "-v", "error", "-ss", f"{moment:.2f}", "-i", str(path),
-                            "-frames:v", "1", "-vf", f"scale='min({FRAME_WIDTH},iw)':-2", "-q:v", "5", str(frame)],
-                           60, "fotogramma non estratto")
-            except ReadError:
-                continue  # senza un fotogramma la lettura va avanti
-            if frame.exists() and frame.stat().st_size:
-                frames.append(("image/jpeg", frame.read_bytes()))
-        return tuple(frames)
+        """I fotogrammi in cui l'immagine cambia: si guarda FRAME_RATE volte al secondo (meno in un
+        video lungo) e mpdecimate scarta quelli quasi uguali al precedente. Se restano più di
+        MAX_FRAMES, se ne prendono MAX_FRAMES distribuiti su tutto il video."""
+        seconds = min(duration or MAX_SECONDS, MAX_SECONDS)
+        rate = min(FRAME_RATE, MAX_FRAMES * 4 / seconds) if seconds else FRAME_RATE
+        folder = work / "frames"
+        folder.mkdir()
+        try:
+            await run_program([self.ffmpeg, "-nostdin", "-v", "error", "-i", str(path), "-t", str(MAX_SECONDS), "-an",
+                               "-vf", f"fps={rate:.4f},mpdecimate,scale='min({FRAME_WIDTH},iw)':-2", "-fps_mode", "vfr",
+                               "-q:v", "5", str(folder / "%04d.jpg")], 60 + seconds / 2, "fotogrammi non estratti",
+                              nice=True)
+        except ReadError:
+            return ()  # senza fotogrammi la lettura va avanti
+        files = [f for f in sorted(folder.glob("*.jpg")) if f.stat().st_size]
+        if len(files) > MAX_FRAMES:
+            files = [files[round(i * (len(files) - 1) / (MAX_FRAMES - 1))] for i in range(MAX_FRAMES)]
+        return tuple(("image/jpeg", f.read_bytes()) for f in files)
 
 
 async def run_program(command, timeout, failure, permanent=False, nice=False):

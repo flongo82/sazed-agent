@@ -48,7 +48,7 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
   JSON-LD, testo principale), anteprime oEmbed con la copertina (per Claude, mai su disco);
   solo host pubblici, al massimo 5 MB
 - `sazed_agent/listener.py`: l'ascolto dei file: ffprobe, audio a 16 kHz e fotogrammi con
-  ffmpeg, trascrizione con whisper.cpp (priorità bassa, al più mezz'ora), in una cartella
+  ffmpeg (uno ogni volta che l'immagine cambia, al più 30, per le scritte), trascrizione con whisper.cpp (priorità bassa, al più mezz'ora), in una cartella
   temporanea che sparisce subito dopo
 - `sazed_agent/documents.py`: i documenti: dati del file e prime pagine, o tutto il testo su
   richiesta; PDF con poppler, EPUB, DOCX e ODT con la libreria standard e limiti sugli archivi
@@ -139,7 +139,9 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   letti o cambiati, con `llama-server`; se non risponde, una pausa). Domande e comandi non aspettano mai
   dietro una lettura; una domanda aspetta solo la lettura degli elementi di cui parla, al
   massimo `READ_WAIT`. Appena arriva un messaggio, 👍 ne segnala la presa in carico: ciò che si
-  custodisce non riceve altre risposte. 🤷 dice che la fonte di un link non si è letta, 😢 che
+  custodisce non riceve altre risposte, tranne quando non si capisce di che cosa parla (non si
+  legge, nulla di letto, o Claude dice `useful: false`) e l'utente non vi ha scritto nulla: allora
+  sazed glielo dice e chiede due parole. 🤷 dice che la fonte di un link non si è letta, 😢 che
   il messaggio è stato messo da parte dopo i tentativi.
 - Il filo: Claude vede i messaggi delle ultime ore (al massimo dieci), con elementi e risposte
   di sazed, più quello a cui l'utente ha risposto. Così un commento o una domanda mandati

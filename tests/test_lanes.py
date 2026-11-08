@@ -376,6 +376,46 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(listener.heard[0][1])
         self.assertEqual(len(fake_claude.images(self.claude.of("describe")[0])), 2)
 
+    # --- scritte nelle immagini, e ciò di cui non si capisce nulla ---
+
+    async def test_the_words_in_the_images_are_kept_with_the_text(self):
+        self.telegram.file("v", b"mp4")
+        frames = tuple(("image/jpeg", b"\xff\xd8" + bytes([n])) for n in range(12))
+        p = self.with_claude(listener=FakeListener(None, frames=frames))
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "recipe", "Pasta e patate", image_text="PASTA E PATATE\n200 g di pasta\n2 patate"))
+        await self.handle(update(1, video={"file_id": "v", "file_unique_id": "V", "duration": 30}), processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        self.assertEqual(self.items()[0].content, "Text in the images:\nPASTA E PATATE\n200 g di pasta\n2 patate")
+        self.assertEqual(len(fake_claude.images(self.claude.of("describe")[0])), 12)  # tutti i fotogrammi
+        self.assertEqual(self.replies(), [])
+
+    async def test_sazed_says_when_it_cannot_tell_what_something_is_about(self):
+        for n in (1, 2):
+            self.telegram.file(f"v{n}", b"mp4")
+        p = await self.start(self.with_claude(listener=FakeListener(None)))
+        self.claude.on("describe", lambda m: fake_claude.description("video", None, useful=False))
+        self.claude.on("interpret", lambda m: interpretation(  # le parole vanno agli elementi del messaggio, o a quelli di prima
+            comment=m["current"]["words"], comment_on=[i["id"] for i in m["current"]["items"]]
+            or [i["id"] for c in m["conversation"] for i in c.get("items", ())]))
+        self.record(p, update(1, video={"file_id": "v1", "file_unique_id": "V1"}))
+        await self.until(lambda: self.replies())
+        self.assertEqual(self.replies(), ["Ciao Ada, di questo non sono riuscito a capire di che cosa parla: "
+                                          "scrivimi due parole e le terrò insieme."])
+        notice = self.telegram.ok_calls("sendMessage")[0][1]
+        self.assertEqual(notice["reply_parameters"]["message_id"], 10)
+        self.assertEqual(self.journal.get(1).reply_text, "di questo non sono riuscito a capire di che cosa parla: "
+                                                         "scrivimi due parole e le terrò insieme.")
+        # la risposta all'avviso porta con sé l'elemento di cui si parlava
+        self.record(p, update(2, "il balletto della festa di Ada", reply_to_message={"message_id": 9000}))
+        await self.until(lambda: self.state(2) == "done")
+        self.assertEqual(self.items()[0].note, "il balletto della festa di Ada")
+        # con le parole dell'utente già scritte, nessun avviso
+        self.record(p, update(3, video={"file_id": "v2", "file_unique_id": "V2"}, caption="la recita"))
+        await self.until(lambda: self.state(3) == "done" and all(i.extraction != "pending" for i in self.items()))
+        await asyncio.sleep(0.3)
+        self.assertEqual(len(self.replies()), 1)
+
     async def test_a_photo_is_looked_at_by_claude(self):
         self.telegram.file("p", b"\xff\xd8foto")
         p = self.with_claude()
@@ -510,10 +550,11 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.web.route("https://example.com/via", 410)
         p = self.processor(reads=True)
         await self.handle(update(1, "https://example.com/via"), processor=p)
-        await self.until(lambda: self.reactions(10) == ["👍", "🤷"])
+        await self.until(lambda: self.reactions(10) == ["👍", "🤷"] and self.replies())
         item = self.items()[0]
         self.assertEqual((item.extraction, item.read_error), ("unavailable", "la fonte non c'è più (HTTP 410)"))
-        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.replies(), ["Ciao Ada, questo non sono riuscito a leggerlo, quindi non so di che cosa "
+                                          "parla: scrivimi due parole e le terrò insieme."])
 
     async def test_a_reading_that_keeps_failing_is_retried_then_given_up(self):
         self.web.route("https://example.com/giu", 503)
@@ -614,6 +655,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.journal.get(2).send_back, (1,))
 
     async def test_files_sent_back_without_words_get_two_of_them(self):
+        self.telegram.file("p", b"\xff\xd8foto")
         p = self.with_claude()
         self.claude.on("interpret", lambda m: interpretation(question=m["current"]["words"]))
         self.claude.on("answer", lambda messages: tool("send_back", {"ids": [1]}) if len(messages) == 1 else "")

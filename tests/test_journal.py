@@ -66,6 +66,13 @@ class JournalTest(unittest.TestCase):
         self.addCleanup(journal.close)
         self.assertEqual(journal.get(200).state, "received")
 
+    def test_a_reply_of_sazed_leads_back_to_the_message_it_answered(self):
+        self.journal.record(1, update(1), "acquisition")
+        self.journal.set_reply(1, 777, "di questo non so di che cosa parla")
+        entry = self.journal.of_reply(update(1)["message"]["chat"]["id"], 777)
+        self.assertEqual((entry.update_id, entry.reply_text), (1, "di questo non so di che cosa parla"))
+        self.assertIsNone(self.journal.of_reply(update(1)["message"]["chat"]["id"], 778))
+
     def test_states_only_move_forward(self):
         self.journal.record(1, update(1), "acquisition")
         self.journal.advance(1, "read")

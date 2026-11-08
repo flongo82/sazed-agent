@@ -138,6 +138,17 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("sazed_agent.claude", "WARNING"):
             self.assertIsNone(await self.claude.describe(item, extract, "it"))
 
+    async def test_describing_reads_the_words_in_the_images_and_says_whether_it_understood(self):
+        self.fake.on("describe", lambda m: description("recipe", "Pasta e patate", image_text="  PASTA E PATATE\n2 patate  ",
+                                                       useful=True))
+        got = await self.claude.describe(self.photo, Extract(None, None, None, True, (("image/jpeg", b"\xff\xd8"),)), "it")
+        self.assertEqual((got.image_text, got.useful), ("PASTA E PATATE\n2 patate", True))
+        schema = self.fake.of("describe")[0]["body"]["output_config"]["format"]["schema"]
+        self.assertTrue({"image_text", "useful"} <= set(schema["properties"]))
+        self.assertIn("each time the picture changes", self.fake.of("describe")[0]["body"]["system"])
+        self.fake.on("describe", lambda m: description("video", None, useful=False))
+        self.assertFalse((await self.claude.describe(self.photo, Extract(None, None, None, True), "it")).useful)
+
     async def test_describing_looks_at_the_images_seen_at_the_source(self):
         self.fake.on("describe", lambda m: description("recipe", "Torta di mele definitiva", ["mele"]))
         extract = Extract(None, "pasticcere", None, False, (("image/jpeg", b"\xff\xd8jpeg"),))

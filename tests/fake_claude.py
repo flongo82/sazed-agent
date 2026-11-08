@@ -35,9 +35,10 @@ def interpretation(note=None, comment=None, comment_on=(), question=None, about=
             "read_in_full_named": read_in_full_named, "keep_spoken": keep_spoken}
 
 
-def description(kind="article", title=None, topics=(), summary=None, authors=(), published=False):
+def description(kind="article", title=None, topics=(), summary=None, authors=(), published=False,
+                image_text=None, useful=True):
     return {"kind": kind, "title": title, "topics": list(topics), "summary": summary, "authors": list(authors),
-            "published": published}
+            "published": published, "image_text": image_text, "useful": useful}
 
 
 def tool(name, arguments):

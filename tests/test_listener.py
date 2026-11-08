@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from sazed_agent import listener
@@ -29,6 +30,10 @@ class ListenerTest(unittest.IsolatedAsyncioTestCase):
         ffmpeg(*sine, "-c:a", "libopus", str(cls.media / "voice.ogg"))
         ffmpeg(*picture, *sine, "-c:v", "mpeg4", "-c:a", "aac", "-shortest", str(cls.media / "video.mp4"))
         ffmpeg(*picture, "-c:v", "mpeg4", str(cls.media / "silent.mp4"))
+        # tre secondi rossi, poi tre blu: come una scritta che cambia su un video fermo
+        ffmpeg("-f", "lavfi", "-i", "color=c=red:s=320x568:d=3:r=10", "-f", "lavfi", "-i",
+               "color=c=blue:s=320x568:d=3:r=10", "-filter_complex", "[0][1]concat=n=2:v=1", "-c:v", "mpeg4",
+               str(cls.media / "slides.mp4"))
         (cls.media / "notes.txt").write_text("non sono un audio")
 
     @classmethod
@@ -59,16 +64,23 @@ class ListenerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((args[args.index("-l") + 1], args[args.index("-t") + 1]), ("auto", "3"))
         self.assertEqual(heard["nice"], 10)  # priorità bassa
 
-    async def test_a_video_gives_its_words_and_some_frames(self):
+    async def test_a_video_gives_its_words_and_a_frame_each_time_the_picture_changes(self):
         extract = await self.listener.listen(self.media / "video.mp4", video=True)
         self.assertEqual(extract.text, "Comprare il riso e il parmigiano")
-        self.assertEqual(len(extract.images), listener.FRAMES)
         self.assertTrue(all(kind == "image/jpeg" and data[:2] == b"\xff\xd8" for kind, data in extract.images))
-        self.assertEqual(len({data for _, data in extract.images}), listener.FRAMES)  # momenti diversi
+        self.assertEqual(len(extract.images), 8)  # testsrc cambia sempre: due al secondo, per quattro secondi
+        self.assertEqual(len({data for _, data in extract.images}), 8)
+        slides = await self.listener.listen(self.media / "slides.mp4", video=True)
+        self.assertEqual(len(slides.images), 2)  # un fotogramma per ogni immagine diversa, non per ogni istante
+
+    async def test_a_long_changing_video_gives_frames_spread_over_all_of_it(self):
+        with mock.patch.object(listener, "MAX_FRAMES", 3):
+            extract = await self.listener.listen(self.media / "silent.mp4", video=True)
+        self.assertEqual(len(extract.images), 3)
 
     async def test_a_video_without_sound_gives_only_frames(self):
         extract = await self.listener.listen(self.media / "silent.mp4", video=True)
-        self.assertEqual((extract.text, len(extract.images)), (None, listener.FRAMES))
+        self.assertEqual((extract.text, len(extract.images)), (None, 8))
         self.assertIsNone(self.heard())  # Whisper non serve
 
     async def test_silence_is_no_text(self):

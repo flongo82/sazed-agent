@@ -38,7 +38,9 @@ spoken in a voice message count like typed ones, so a question asked aloud gets 
   through yt-dlp, or the audio when there are none; for Instagram reels, with the cookies of a
   secondary account, also the video, transcribed and looked at through a few frames;
 - files sent in the chat: photos are looked at by Claude; voice messages, audio and videos are
-  transcribed on your computer by whisper.cpp, and a video also gives a few frames;
+  transcribed on your computer by whisper.cpp, and a video also gives a frame each time its
+  picture changes (up to 30), so that Claude reads the words that appear on it: in a reel without
+  sound or caption they are often all it says;
 - documents (PDF, EPUB, DOCX, ODT, plain text): only their file data and first pages unless
   you ask for more, enough for the title, the authors and a paper's abstract. When a published
   work's first pages do not say what it is about, its card is looked up in free catalogues
@@ -46,7 +48,10 @@ spoken in a voice message count like typed ones, so a question asked aloud gets 
   document in full, with it or later, and the whole text is read and summarised.
 
 From what was read, Claude gives each item a kind, a title, its authors, topics and a short
-summary, which coppermind indexes. A source that cannot be read gets 🤷 on its message.
+summary, and the words written in its images (a photo, a screenshot, the captions of a video),
+which coppermind indexes with the text. A source that cannot be read gets 🤷 on its message. When
+sazed cannot tell what something is about, and you wrote nothing with it, it says so and asks you
+for a few words: they are kept with it.
 
 **Answers questions** in the chat, looking into coppermind with read-only tools: exact
 filters and words, meaning (so "desserts that need no oven" finds a tiramisù, even saved with

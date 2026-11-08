@@ -12,6 +12,9 @@ MESSAGES = {
         "unsupported": "questo tipo di messaggio non so ancora custodirlo.",
         "no_answer": "non sono riuscito a rispondere a questa domanda: riprova tra poco.",
         "here_it_is": lambda files: "eccolo." if files == 1 else "eccoli.",
+        "unknown": "di questo non sono riuscito a capire di che cosa parla: scrivimi due parole e le terrò insieme.",
+        "unreadable": ("questo non sono riuscito a leggerlo, quindi non so di che cosa parla: scrivimi due "
+                       "parole e le terrò insieme."),
         "file_gone": lambda title=None: (
             f"non riesco più a rimandarti {f'«{title}»' if title else 'questo file'}: su Telegram non c'è più."),
         "status": lambda name, pending, failed, kept: (
@@ -30,6 +33,9 @@ MESSAGES = {
         "unsupported": "I can't keep this kind of message yet.",
         "no_answer": "I couldn't answer this question: try again in a little while.",
         "here_it_is": lambda files: "here it is." if files == 1 else "here they are.",
+        "unknown": "I couldn't tell what this is about: write me a few words and I'll keep them with it.",
+        "unreadable": ("I couldn't read this, so I don't know what it is about: write me a few words and I'll keep "
+                       "them with it."),
         "file_gone": lambda title=None: (
             f"I can't send you {f'“{title}”' if title else 'this file'} back any more: it is gone from Telegram."),
         "status": lambda name, pending, failed, kept: (

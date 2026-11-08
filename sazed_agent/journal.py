@@ -42,14 +42,15 @@ CREATE TABLE IF NOT EXISTS inbox (
   interpretation   TEXT,
   links            TEXT,
   reply_text       TEXT,
-  send_back        TEXT
+  send_back        TEXT,
+  unknown          TEXT
 );
 CREATE INDEX IF NOT EXISTS inbox_due ON inbox (lane, state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS inbox_chat ON inbox (chat_id, received_at);
 """
 
 # Colonne aggiunte dopo la prima versione: i registri di prima le ricevono all'avvio.
-ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT", "send_back": "TEXT"}
+ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT", "send_back": "TEXT", "unknown": "TEXT"}
 
 
 class JournalError(Exception):
@@ -74,6 +75,7 @@ class Entry:
     links: dict | None = None        # link breve → indirizzo vero
     reply_text: str | None = None
     send_back: tuple = ()            # gli elementi di cui la risposta rimanda il messaggio originale
+    unknown: dict | None = None      # elementi letti senza capirne nulla, prima che le parole fossero salvate
 
 
 class Journal:
@@ -148,6 +150,14 @@ class Journal:
             (chat_id, message_id)).fetchone()
         return _entry(row) if row else None
 
+    def of_reply(self, chat_id, message_id):
+        """L'ingresso a cui sazed ha risposto con quel messaggio, o None: l'utente che risponde a
+        sazed parla di ciò a cui sazed rispondeva."""
+        row = self.db.execute(
+            "SELECT * FROM inbox WHERE chat_id = ? AND reply_message_id = ? ORDER BY received_at DESC LIMIT 1",
+            (chat_id, message_id)).fetchone()
+        return _entry(row) if row else None
+
     def advance(self, update_id, state, reply_message_id=None):
         """Porta un elemento a uno stato successivo. Uno stato non torna mai indietro."""
         if state not in STATES or state == "failed":
@@ -172,6 +182,16 @@ class Journal:
                 (reply_message_id, text, json.dumps(list(send_back)) if send_back else None, self.clock(),
                  update_id),
             )
+
+    def add_unknown(self, update_id, item_id, reason):
+        """Un elemento del messaggio di cui non si capisce nulla, letto prima che le parole del
+        messaggio fossero salvate: l'avviso lo decide l'ingresso, quando sa se l'utente ha scritto
+        qualcosa."""
+        with self.transaction():
+            row = self.db.execute("SELECT unknown FROM inbox WHERE update_id = ?", (update_id,)).fetchone()
+            unknown = dict(json.loads(row["unknown"]) if row and row["unknown"] else {}, **{str(item_id): reason})
+            self.db.execute("UPDATE inbox SET unknown = ?, updated_at = ? WHERE update_id = ?",
+                            (json.dumps(unknown), self.clock(), update_id))
 
     def set_links(self, update_id, links):
         """Annota gli indirizzi veri dei link brevi del messaggio (link breve → indirizzo)."""
@@ -279,4 +299,5 @@ def _entry(row):
         interpretation=json.loads(row["interpretation"]) if row["interpretation"] else None,
         links=json.loads(row["links"]) if row["links"] else None, reply_text=row["reply_text"],
         send_back=tuple(json.loads(row["send_back"])) if row["send_back"] else (),
+        unknown=json.loads(row["unknown"]) if row["unknown"] else None,
     )
