@@ -265,6 +265,19 @@ class Journal:
                 (str(error)[:500], self.clock(), update_id),
             )
 
+    def reopen(self, update_id, chat_id):
+        """Un messaggio in errore della chat chat_id, che l'utente chiede di riprovare, torna da
+        elaborare da capo, con i tentativi azzerati: ogni passo è idempotente (l'interpretazione
+        annotata si riusa, una risposta già mandata non si rimanda). False se non è in errore."""
+        with self.transaction():
+            row = self.db.execute("SELECT state, chat_id FROM inbox WHERE update_id = ?", (update_id,)).fetchone()
+            if row is None or row["state"] != "failed" or row["chat_id"] != chat_id:
+                return False
+            now = self.clock()
+            self.db.execute("UPDATE inbox SET state = 'received', attempts = 0, next_attempt_at = ?, last_error = NULL,"
+                            " updated_at = ? WHERE update_id = ?", (now, now, update_id))
+        return True
+
     def counts(self, lane=None):
         """Quanti elementi per stato, in tutto o in una corsia, per /stato."""
         if lane is None:

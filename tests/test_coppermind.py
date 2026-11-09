@@ -188,6 +188,18 @@ class Saving(Base):
         self.assertEqual(self.memory.count(), 0)
 
 
+class ReadAgain(Base):
+    def test_only_a_failed_reading_of_the_same_chat_comes_back(self):
+        [item] = [o.item for o in self.save(10, Draft("link", url="https://example.com/giu"))]
+        self.assertFalse(self.memory.read_again(item.id, 42))  # ancora da leggere: niente da riprovare
+        self.memory.read_failed(item.id, "HTTP 503", (), final="failed")
+        self.assertFalse(self.memory.read_again(item.id, 7))
+        self.assertTrue(self.memory.read_again(item.id, 42))
+        again = self.memory.get(item.id)
+        self.assertEqual((again.extraction, again.read_error), ("pending", None))
+        self.assertEqual(self.memory.to_read(["link"]).id, item.id)
+
+
 class Reading(Base):
     def test_items_are_read_in_order_and_awaited_ones_first(self):
         a, b, c = (self.save(n, Draft("link", url=f"https://example.com/{n}"))[0].item for n in (10, 11, 12))

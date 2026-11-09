@@ -254,6 +254,15 @@ def run(agent, other, tg_worker, tg_agent, it, en, work):
     check("nessuna risposta di riserva dal Worker dopo l'attesa", quiet(tg_worker, 2.5) == 0)
     post(link)  # Telegram può riconsegnare un aggiornamento già consegnato
     check("un doppione non ha una seconda reazione", quiet(tg_agent, 2) == 0 and len(reactions(tg_agent, link)) == 1)
+    tap = {"update_id": next(_next_id), "callback_query": {
+        "id": "tocco", "chat_instance": "1", "data": "retry:message:999999",
+        "from": {"id": USER, "is_bot": False, "first_name": FIRST_NAME, "language_code": "it"},
+        "message": {"message_id": 1, "date": int(time.time()), "chat": {"id": USER, "type": "private"}}}}
+    post(tap)
+    answered = wait_until(lambda: [p for _, p in tg_agent.ok_calls("answerCallbackQuery")
+                                   if p.get("callback_query_id") == "tocco"])
+    check("un tocco su Riprova passa dal Worker all'agente, che risponde al tocco",
+          bool(answered) and answered[0]["text"] == it["nothing_to_retry"], answered)
     english = message("/help", lang="en")
     post(english)
     wait_until(lambda: replies(tg_agent, english))

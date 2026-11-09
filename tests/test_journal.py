@@ -73,6 +73,16 @@ class JournalTest(unittest.TestCase):
         self.assertEqual((entry.update_id, entry.reply_text), (1, "di questo non so di che cosa parla"))
         self.assertIsNone(self.journal.of_reply(update(1)["message"]["chat"]["id"], 778))
 
+    def test_a_message_set_aside_can_be_reopened_from_its_own_chat_only(self):
+        self.journal.record(1, update(1), "acquisition")
+        self.journal.fail(1, "rotto")
+        self.assertFalse(self.journal.reopen(1, 7))  # un'altra chat
+        self.assertTrue(self.journal.reopen(1, 42))
+        entry = self.journal.get(1)
+        self.assertEqual((entry.state, entry.attempts, entry.last_error), ("received", 0, None))
+        self.assertFalse(self.journal.reopen(1, 42))  # già riaperto: un secondo tocco non fa nulla
+        self.assertFalse(self.journal.reopen(99, 42))
+
     def test_states_only_move_forward(self):
         self.journal.record(1, update(1), "acquisition")
         self.journal.advance(1, "read")

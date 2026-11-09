@@ -139,7 +139,10 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
 - Una risposta Telegram dall'esito incerto si rimanda: meglio una risposta doppia che
   nessuna. Il `message_id` della risposta si registra appena noto.
 - Tentativi limitati con attese crescenti, poi `in errore` con il motivo; l'utente viene
-  avvisato e può chiedere di riprovare. Un elemento in errore non blocca gli altri.
+  avvisato, con un pulsante Riprova che riporta il messaggio all'inizio con i tentativi azzerati
+  (anche sotto l'avviso di una fonte non letta per un problema passeggero). Il tocco arriva come
+  `callback_query` e va nella corsia dei comandi; vale solo dalla stessa chat. Un elemento in
+  errore non blocca gli altri.
 - Il codice salva, il modello interpreta: ingresso, link e file si custodiscono prima di
   chiamare Claude; Claude restituisce come dati strutturati a che cosa servono le parole e la
   descrizione di ciò che si è letto; il codice controlla (elementi solo fra quelli mostrati) e

@@ -1,7 +1,9 @@
 """Le corsie dell'agente: ogni messaggio preso in carico subito, i contenuti letti con calma, e
 le domande che non aspettano dietro una lettura lunga.
 
-- comandi: /stato, risposto subito;
+- comandi: /stato, risposto subito, e i tocchi sui pulsanti (Riprova, sotto l'avviso di un
+  messaggio messo da parte o di una fonte non letta per un problema passeggero): il messaggio o
+  la lettura ripartono da capo, con i tentativi azzerati;
 - ingresso (stati received e read): 👍 appena il messaggio arriva, poi link e file in
   coppermind (read); Claude dice a che cosa servono le parole, nel filo della conversazione:
   una nota, un commento a elementi di questo messaggio o di uno di poco prima, una domanda; il
@@ -75,7 +77,10 @@ SPOKEN = ("voice", "video_note")  # l'utente che parla, se non sono inoltrati
 
 
 def lane_for(update):
-    """"commands" per il comando di stato in qualunque lingua, "acquisition" per tutto il resto."""
+    """"commands" per il comando di stato in qualunque lingua e per i tocchi sui pulsanti,
+    "acquisition" per tutto il resto."""
+    if "callback_query" in update:
+        return "commands"
     text = (_message(update).get("text") or "").strip()
     if not text.startswith("/"):
         return "acquisition"
@@ -477,7 +482,8 @@ class Processor:
                         "si riproverà" if outcome == "pending" else outcome)
             if outcome != "pending":
                 await self._react(item.chat_id, item.message_id, self.reactions.unreadable)
-                await self._say_unknown(item, "unreadable")
+                # final è vuoto quando sono finiti i tentativi per un problema passeggero: lì riprovare ha senso
+                await self._say_unknown(item, "unreadable+retry" if final is None else "unreadable")
                 self._read_over()
             return
         if not item.read_full and getattr(self.memory.get(item.id), "read_full", False):
@@ -517,9 +523,10 @@ class Processor:
 
     async def _say_unknown(self, item, reason):
         """Di un elemento non si sa di che cosa parla (reason: "unknown" se si è letto ma non dice
-        nulla, "unreadable" se non si legge). Se le parole del suo messaggio non sono ancora salvate,
-        l'avviso lo decide l'ingresso dopo averle salvate (lo si annota nel registro, senza attese
-        in mezzo: nessuna corsa); altrimenti si decide adesso."""
+        nulla, "unreadable" se non si legge, "unreadable+retry" se riprovare può servire). Se le
+        parole del suo messaggio non sono ancora salvate, l'avviso lo decide l'ingresso dopo averle
+        salvate (lo si annota nel registro, senza attese in mezzo: nessuna corsa); altrimenti si
+        decide adesso."""
         entry = self.journal.of_message(item.chat_id, item.message_id)
         if entry is None:
             return
@@ -536,9 +543,12 @@ class Processor:
         if current is None or current.note:
             return
         t, hello = self._voice(entry)
-        text = t[reason] + (f" {t['reel_hint']}" if current.platform in VIDEO_IF_NEEDED else "")
+        base, _, retry = reason.partition("+")
+        text = t[base] + (f" {t['reel_hint']}" if current.platform in VIDEO_IF_NEEDED else "")
         try:
-            reply_id = await self.telegram.send_message(item.chat_id, f"{hello}, {text}", reply_to=item.message_id)
+            reply_id = await self.telegram.send_message(
+                item.chat_id, f"{hello}, {text}", reply_to=item.message_id,
+                button=(t["retry"], f"retry:item:{item.id}") if retry else None)
         except TelegramError as err:
             log.warning("elemento %s: avviso di contenuto incomprensibile non inviato: %s", item.id, err)
             return
@@ -671,6 +681,11 @@ class Processor:
     # --- comandi, errori, voce ---
 
     async def _command(self, entry):
+        if "callback_query" in entry.update:
+            await self._button(entry)
+            self.journal.advance(entry.update_id, "done")
+            log.info("elemento %s completato: pulsante", entry.update_id)
+            return
         if entry.reply_message_id is None:
             t, hello = self._voice(entry)
             counts = self.journal.counts("acquisition")
@@ -681,15 +696,43 @@ class Processor:
         self.journal.advance(entry.update_id, "done")
         log.info("elemento %s completato: stato inviato", entry.update_id)
 
+    async def _button(self, entry):
+        """Il tocco di Riprova: il messaggio messo da parte (o la lettura fallita) della stessa chat
+        riparte da capo, e 👍 torna sul messaggio. Si risponde subito al tocco e il pulsante sparisce,
+        così un secondo tocco non riprova due volte; un pulsante vecchio dice che non c'è più nulla."""
+        query = entry.update["callback_query"]
+        message = query.get("message") or {}
+        chat_id = (message.get("chat") or {}).get("id")
+        t = messages_for(self.language, (query.get("from") or {}).get("language_code"))
+        kind, _, ref = (query.get("data") or "").removeprefix("retry:").partition(":")
+        again = None
+        if (query.get("data") or "").startswith("retry:") and ref.isdigit():
+            if kind == "message" and self.journal.reopen(int(ref), chat_id):
+                again = self.journal.get(int(ref))
+            elif kind == "item" and self.memory.read_again(int(ref), chat_id):
+                again = self.memory.get(int(ref))
+        with contextlib.suppress(TelegramError):
+            await self.telegram.answer_button(query.get("id"), t["retrying"] if again else t["nothing_to_retry"])
+        if chat_id is not None and message.get("message_id") is not None:
+            with contextlib.suppress(TelegramError):
+                await self.telegram.remove_button(chat_id, message["message_id"])
+        if again is not None:
+            await self._react(chat_id, again.message_id, self.reactions.received)
+            log.info("%s %s di nuovo da elaborare, come chiesto dall'utente", "messaggio" if kind == "message"
+                     else "elemento", ref)
+            self.notify()
+
     async def _report_failure(self, entry):
-        """Avvisa una volta sola che un messaggio è stato messo da parte. Se non riesce, lo annota."""
+        """Avvisa una volta sola che un messaggio è stato messo da parte, con Riprova. Se non
+        riesce, lo annota."""
         if entry.chat_id is None:
             return
         failed = self.journal.get(entry.update_id)
         t, hello = self._voice(entry)
         try:
             await self.telegram.send_message(entry.chat_id, f"{hello}, {t['failed'](failed.attempts)}",
-                                             reply_to=entry.message_id)
+                                             reply_to=entry.message_id,
+                                             button=(t["retry"], f"retry:message:{entry.update_id}"))
         except TelegramError as err:
             log.warning("avviso di errore per %s non inviato: %s", entry.update_id, err)
         await self._react(entry.chat_id, entry.message_id, self.reactions.failed)

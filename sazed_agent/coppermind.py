@@ -404,6 +404,17 @@ class Coppermind:
                     (self.clock(), self.clock(), item_id))
         return True
 
+    def read_again(self, item_id, chat_id):
+        """Una lettura fallita di un elemento della chat chat_id, che l'utente chiede di riprovare:
+        torna da leggere, con i tentativi azzerati. False se non è fallita (o non c'è)."""
+        with transaction(self.db):
+            row = self.db.execute("SELECT extraction, chat_id FROM items WHERE id = ?", (item_id,)).fetchone()
+            if row is None or row["extraction"] != "failed" or row["chat_id"] != chat_id:
+                return False
+            self.db.execute("UPDATE items SET extraction = 'pending', read_attempts = 0, next_read_at = ?,"
+                            " read_error = NULL, updated_at = ? WHERE id = ?", (self.clock(), self.clock(), item_id))
+        return True
+
     def passages(self, item_id, text, limit=5):
         """I punti del testo letto di un elemento che parlano di più delle parole date (anche
         come inizio di parola, senza badare agli accenti), nell'ordine in cui vengono, come

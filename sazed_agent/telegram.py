@@ -37,10 +37,23 @@ class Telegram:
     def __init__(self, api_base, token, timeout=30):
         self.api_base, self.token, self.timeout = api_base.rstrip("/"), token, timeout
 
-    async def send_message(self, chat_id, text, reply_to=None):
-        """Manda un messaggio, in risposta a reply_to se c'è. Restituisce il suo message_id."""
-        result = await self.call("sendMessage", _replying({"chat_id": chat_id, "text": text}, reply_to))
+    async def send_message(self, chat_id, text, reply_to=None, button=None):
+        """Manda un messaggio, in risposta a reply_to se c'è, con un pulsante sotto se button è
+        (testo, dati che tornano quando lo si tocca). Restituisce il suo message_id."""
+        params = _replying({"chat_id": chat_id, "text": text}, reply_to)
+        if button:
+            params["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "callback_data": button[1]}]]}
+        result = await self.call("sendMessage", params)
         return result["message_id"]
+
+    async def answer_button(self, query_id, text):
+        """Risponde al tocco di un pulsante: Telegram mostra text per un attimo e smette di attendere."""
+        await self.call("answerCallbackQuery", {"callback_query_id": query_id, "text": text})
+
+    async def remove_button(self, chat_id, message_id):
+        """Toglie i pulsanti da un messaggio del bot."""
+        await self.call("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id,
+                                                   "reply_markup": {"inline_keyboard": []}})
 
     async def copy_message(self, chat_id, from_chat_id, message_id, reply_to=None):
         """Copia un messaggio, con il suo file e la sua didascalia, in risposta a reply_to.

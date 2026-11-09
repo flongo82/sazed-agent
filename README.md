@@ -53,7 +53,8 @@ From what was read, Claude gives each item a kind, a title, its authors, topics 
 summary, and the words written in its images (a photo, a screenshot, the captions of a video),
 which coppermind indexes with the text. A source that cannot be read gets 🤷 on its message. When
 sazed cannot tell what something is about, and you wrote nothing with it, it says so and asks you
-for a few words: they are kept with it.
+for a few words: they are kept with it. A message set aside after its attempts, or a source that
+could not be read because of a passing problem, comes with a Retry button that starts it over.
 
 **Answers questions** in the chat, looking into coppermind with read-only tools: exact
 filters and words, meaning (so "desserts that need no oven" finds a tiramisù, even saved with

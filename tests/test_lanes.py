@@ -91,6 +91,13 @@ class FakeBigFiles:
         return len(self.files[message_id])
 
 
+def tap(update_id, data, notice_id, chat=42):
+    """Ada che tocca un pulsante sotto il messaggio notice_id del bot."""
+    return {"update_id": update_id, "callback_query": {
+        "id": f"q{update_id}", "from": {"id": chat, "first_name": "Ada", "language_code": "it"},
+        "message": {"message_id": notice_id, "chat": {"id": chat, "type": "private"}}, "data": data}}
+
+
 def text_has(fragment):
     return lambda method, params: method == "sendMessage" and fragment in params.get("text", "")
 
@@ -885,6 +892,73 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notices, ["Ciao Ada, non sono riuscito a elaborare questo messaggio dopo 3 tentativi: "
                                    "lo tengo da parte."])
         self.assertEqual(self.reactions(10), ["👍", "😢"])
+
+    # --- Riprova ---
+
+    def button_of(self, fragment):
+        """Il pulsante sotto il messaggio del bot che contiene fragment, e il message_id del messaggio."""
+        sends = [(prm, n) for n, (m, prm) in enumerate(self.telegram.ok_calls("sendMessage")) if fragment in prm["text"]]
+        prm, n = sends[-1]
+        keyboard = (prm.get("reply_markup") or {}).get("inline_keyboard")
+        return (keyboard[0][0] if keyboard else None), 9000 + n
+
+    async def test_a_message_set_aside_comes_back_with_retry(self):
+        broken = [True]
+        self.telegram.rule(lambda m, prm: 500 if broken[0] and text_has("non conosco")(m, prm) else None)
+        p = await self.start()
+        self.record(p, update(1, "/aiuto"))
+        await self.until(lambda: self.reactions(10) == ["👍", "😢"])
+        button, notice = self.button_of("lo tengo da parte")
+        self.assertEqual(button, {"text": "Riprova", "callback_data": "retry:message:1"})
+        broken[0] = False
+        self.record(p, tap(2, button["callback_data"], notice))
+        await self.until(lambda: self.state(1) == "done")
+        self.assertIn("Ciao Ada, non conosco il comando /aiuto.", self.replies())
+        self.assertEqual(self.reactions(10), ["👍", "😢", "👍", "👍"])  # di nuovo in lavorazione, poi da capo
+        [answer] = [prm for _, prm in self.telegram.ok_calls("answerCallbackQuery")]
+        self.assertEqual((answer["callback_query_id"], answer["text"]), ("q2", "Riprovo."))
+        [removed] = [prm for _, prm in self.telegram.ok_calls("editMessageReplyMarkup")]
+        self.assertEqual((removed["message_id"], removed["reply_markup"]), (notice, {"inline_keyboard": []}))
+        self.assertEqual((self.journal.get(1).attempts, self.state(2)), (0, "done"))
+
+    def test_taps_go_to_the_quick_lane(self):
+        self.assertEqual((lane_for(tap(1, "retry:message:1", 9000)), lane_for(update(2, "ciao"))),
+                         ("commands", "acquisition"))
+
+    async def test_an_old_or_foreign_tap_retries_nothing(self):
+        self.telegram.rule(lambda m, prm: 400 if text_has("non conosco")(m, prm) else None)
+        p = await self.start()
+        self.record(p, update(1, "/aiuto"))
+        await self.until(lambda: self.state(1) == "failed")
+        self.record(p, tap(2, "retry:message:1", 9000, chat=7))  # da un'altra chat
+        self.record(p, tap(3, "retry:message:99", 9000))         # un messaggio che non c'è
+        self.record(p, tap(4, "qualcos'altro", 9000))
+        await self.until(lambda: all(self.state(n) == "done" for n in (2, 3, 4)))
+        self.assertEqual(self.state(1), "failed")
+        answers = [prm["text"] for _, prm in self.telegram.ok_calls("answerCallbackQuery")]
+        self.assertEqual(answers, ["Non c'è più nulla da riprovare."] * 3)
+
+    async def test_a_source_down_for_a_while_can_be_read_again(self):
+        self.web.route("https://example.com/giu", 503)
+        p = await self.start(self.processor(reads=True))
+        self.record(p, update(1, "https://example.com/giu"))
+        await self.until(lambda: self.reactions(10) == ["👍", "🤷"] and self.replies())
+        button, notice = self.button_of("non sono riuscito a leggerlo")
+        item = self.items()[0]
+        self.assertEqual((button, item.extraction), ({"text": "Riprova", "callback_data": f"retry:item:{item.id}"},
+                                                     "failed"))
+        self.web.page("https://example.com/giu", ARTICLE)  # il sito è tornato
+        self.record(p, tap(2, button["callback_data"], notice))
+        await self.until(lambda: self.items()[0].extraction == "complete")
+        self.assertEqual(self.reactions(10), ["👍", "🤷", "👍"])
+        self.assertIn("Torta di mele", self.items()[0].title)
+
+    async def test_a_source_that_is_gone_offers_no_retry(self):
+        self.web.route("https://example.com/via", 410)
+        p = self.processor(reads=True)
+        await self.handle(update(1, "https://example.com/via"), processor=p)
+        await self.until(lambda: self.replies())
+        self.assertIsNone(self.button_of("non sono riuscito a leggerlo")[0])
 
     async def test_permanent_error_fails_at_once(self):
         self.telegram.rule(lambda m, prm: 400 if text_has("non conosco")(m, prm) else None)

@@ -12,6 +12,9 @@ MESSAGES = {
         "unsupported": "questo tipo di messaggio non so ancora custodirlo.",
         "no_answer": "non sono riuscito a rispondere a questa domanda: riprova tra poco.",
         "here_it_is": lambda files: "eccolo." if files == 1 else "eccoli.",
+        "retry": "Riprova",
+        "retrying": "Riprovo.",
+        "nothing_to_retry": "Non c'è più nulla da riprovare.",
         "unknown": "di questo non sono riuscito a capire di che cosa parla: scrivimi due parole e le terrò insieme.",
         "unreadable": ("questo non sono riuscito a leggerlo, quindi non so di che cosa parla: scrivimi due "
                        "parole e le terrò insieme."),
@@ -35,6 +38,9 @@ MESSAGES = {
         "unsupported": "I can't keep this kind of message yet.",
         "no_answer": "I couldn't answer this question: try again in a little while.",
         "here_it_is": lambda files: "here it is." if files == 1 else "here they are.",
+        "retry": "Retry",
+        "retrying": "Trying again.",
+        "nothing_to_retry": "There is nothing left to retry.",
         "unknown": "I couldn't tell what this is about: write me a few words and I'll keep them with it.",
         "unreadable": ("I couldn't read this, so I don't know what it is about: write me a few words and I'll keep "
                        "them with it."),
