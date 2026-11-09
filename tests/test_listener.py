@@ -98,35 +98,6 @@ class ListenerTest(unittest.IsolatedAsyncioTestCase):
             extract = await self.listener.listen(self.media / "colors.mp4", video=True)
         self.assertEqual(len(extract.images), 2)
 
-
-class CaptionsTest(unittest.TestCase):
-    def test_close_frames_with_the_same_writing_are_one_caption(self):
-        pages = [["3", "UOVA", "E", "200", "G"], ["UOVA", "E", "200", "G", "DI", "ZUCCHERO"], [],
-                 ["UOVA", "200", "ZUCCHERO"], ["Monta", "tutto", "per", "10", "minuti"], [], [], [],
-                 ["Monta", "tutto", "per", "10", "minuti"]]
-        self.assertEqual(listener._captions(pages), [(0, 3, "UOVA E 200 G DI ZUCCHERO"),
-                                                     (4, 4, "Monta tutto per 10 minuti"),
-                                                     (8, 8, "Monta tutto per 10 minuti")])  # tornata dopo un po'
-
-    def test_noise_that_changes_from_frame_to_frame_goes_away(self):
-        pages = [["TIRAMISU", "Sa", "IN"], ["TIRAMISU", "IN", "Pei", "5"], ["5", "TIRAMISU", "ty"], ["MINUTI"]]
-        self.assertEqual(listener._steady(pages), [["TIRAMISU", "IN"], ["TIRAMISU", "IN", "5"], ["5", "TIRAMISU"], []])
-        self.assertEqual(listener._steady([["solo"], ["due"]]), [["solo"], ["due"]])
-
-    def test_claude_sees_a_frame_per_caption_and_at_least_a_few(self):
-        self.assertEqual(listener._chosen([(0, 3, "a"), (4, 6, "b")], 20), [0, 1, 5, 6])  # 1 e 5 a metà delle scritte
-        many = [(i, i, str(i)) for i in range(0, 60, 2)]
-        self.assertEqual(len(listener._chosen(many, 60)), listener.CLAUDE_FRAMES)
-        self.assertEqual(listener._chosen([], 1), [0])
-
-    def test_only_words_tesseract_is_sure_of(self):
-        header = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"
-        rows = [header, "5\t1\t1\t1\t1\t1\t0\t0\t9\t9\t91.5\tMonta", "5\t1\t1\t1\t1\t2\t0\t0\t9\t9\t30\tx#q",
-                "5\t1\t1\t1\t1\t3\t0\t0\t9\t9\t88\t3", "5\t1\t1\t1\t1\t4\t0\t0\t9\t9\t95\t)", "1\t1\t0\t0\t0\t0",
-                "5\t1\t1\t1\t1\t5\t0\t0\t9\t9\t92\tE", "5\t1\t1\t1\t1\t6\t0\t0\t9\t9\t70\ti"]
-        self.assertEqual(listener._confident("\n".join(rows)), ["Monta", "3", "E"])  # "i" non abbastanza sicura
-
-
     async def test_silence_is_no_text(self):
         self.will({"text": " \n "})
         self.assertIsNone((await self.listener.listen(self.media / "voice.ogg")).text)
@@ -157,6 +128,34 @@ class CaptionsTest(unittest.TestCase):
         old = listener.MAX_SECONDS
         listener.MAX_SECONDS = seconds
         self.addCleanup(setattr, listener, "MAX_SECONDS", old)
+
+
+class CaptionsTest(unittest.TestCase):
+    def test_close_frames_with_the_same_writing_are_one_caption(self):
+        pages = [["3", "UOVA", "E", "200", "G"], ["UOVA", "E", "200", "G", "DI", "ZUCCHERO"], [],
+                 ["UOVA", "200", "ZUCCHERO"], ["Monta", "tutto", "per", "10", "minuti"], [], [], [],
+                 ["Monta", "tutto", "per", "10", "minuti"]]
+        self.assertEqual(listener._captions(pages), [(0, 3, "UOVA E 200 G DI ZUCCHERO"),
+                                                     (4, 4, "Monta tutto per 10 minuti"),
+                                                     (8, 8, "Monta tutto per 10 minuti")])  # tornata dopo un po'
+
+    def test_noise_that_changes_from_frame_to_frame_goes_away(self):
+        pages = [["TIRAMISU", "Sa", "IN"], ["TIRAMISU", "IN", "Pei", "5"], ["5", "TIRAMISU", "ty"], ["MINUTI"]]
+        self.assertEqual(listener._steady(pages), [["TIRAMISU", "IN"], ["TIRAMISU", "IN", "5"], ["5", "TIRAMISU"], []])
+        self.assertEqual(listener._steady([["solo"], ["due"]]), [["solo"], ["due"]])
+
+    def test_claude_sees_a_frame_per_caption_and_at_least_a_few(self):
+        self.assertEqual(listener._chosen([(0, 3, "a"), (4, 6, "b")], 20), [0, 1, 5, 6])  # 1 e 5 a metà delle scritte
+        many = [(i, i, str(i)) for i in range(0, 60, 2)]
+        self.assertEqual(len(listener._chosen(many, 60)), listener.CLAUDE_FRAMES)
+        self.assertEqual(listener._chosen([], 1), [0])
+
+    def test_only_words_tesseract_is_sure_of(self):
+        header = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"
+        rows = [header, "5\t1\t1\t1\t1\t1\t0\t0\t9\t9\t91.5\tMonta", "5\t1\t1\t1\t1\t2\t0\t0\t9\t9\t30\tx#q",
+                "5\t1\t1\t1\t1\t3\t0\t0\t9\t9\t88\t3", "5\t1\t1\t1\t1\t4\t0\t0\t9\t9\t95\t)", "1\t1\t0\t0\t0\t0",
+                "5\t1\t1\t1\t1\t5\t0\t0\t9\t9\t92\tE", "5\t1\t1\t1\t1\t6\t0\t0\t9\t9\t70\ti"]
+        self.assertEqual(listener._confident("\n".join(rows)), ["Monta", "3", "E"])  # "i" non abbastanza sicura
 
 
 if __name__ == "__main__":
