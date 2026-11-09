@@ -73,6 +73,21 @@ class JournalTest(unittest.TestCase):
         self.assertEqual((entry.update_id, entry.reply_text), (1, "di questo non so di che cosa parla"))
         self.assertIsNone(self.journal.of_reply(update(1)["message"]["chat"]["id"], 778))
 
+    def test_the_balance_counts_each_message_once_and_no_commands(self):
+        self.journal.record(1, update(1), "acquisition")
+        self.journal.record(2, update(2), "acquisition")
+        self.journal.record(3, update(3), "commands")  # /stato o un tocco: non è un messaggio da contare
+        self.journal.advance(1, "done")
+        self.journal.fail(2, "rotto")
+        edited = {"update_id": 4, "edited_message": dict(update(2)["message"], text="corretto")}
+        self.journal.record(4, edited, "acquisition")  # la modifica del messaggio 2: conta la sua ultima versione
+        counts = self.journal.balance(42)
+        self.assertEqual((sum(counts.values()), counts["done"], counts["received"], counts["failed"]), (2, 1, 1, 0))
+        self.assertEqual(self.journal.set_aside(42), [])
+        self.journal.fail(4, "rotto anche lui")
+        self.assertEqual([e.update_id for e in self.journal.set_aside(42)], [4])
+        self.assertEqual(self.journal.balance(7)["failed"], 0)  # un'altra chat
+
     def test_a_message_set_aside_can_be_reopened_from_its_own_chat_only(self):
         self.journal.record(1, update(1), "acquisition")
         self.journal.fail(1, "rotto")

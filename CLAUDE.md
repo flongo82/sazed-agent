@@ -143,6 +143,10 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   (anche sotto l'avviso di una fonte non letta per un problema passeggero). Il tocco arriva come
   `callback_query` e va nella corsia dei comandi; vale solo dalla stessa chat. Un elemento in
   errore non blocca gli altri.
+- `/bilancio` conta i messaggi dell'utente nel registro (l'ultima versione di ciascuno, comandi
+  esclusi) e le letture in coppermind (`retryable`: fallite per un problema passeggero). I suoi
+  pulsanti (`show:retry`, `retry:all`) e «Più indietro» (`show:retry:<message_id>:<tipo>:<n>`,
+  un segno nella chat, non una posizione) vanno anch'essi nella corsia dei comandi.
 - Il codice salva, il modello interpreta: ingresso, link e file si custodiscono prima di
   chiamare Claude; Claude restituisce come dati strutturati a che cosa servono le parole e la
   descrizione di ciò che si è letto; il codice controlla (elementi solo fra quelli mostrati) e

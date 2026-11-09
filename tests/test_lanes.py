@@ -8,8 +8,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from sazed_agent import intake
+from sazed_agent import intake, lanes
 from sazed_agent.claude import Claude, Interpretation
 from sazed_agent.config import Reactions
 from sazed_agent.coppermind import Coppermind, Draft
@@ -921,9 +922,10 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((removed["message_id"], removed["reply_markup"]), (notice, {"inline_keyboard": []}))
         self.assertEqual((self.journal.get(1).attempts, self.state(2)), (0, "done"))
 
-    def test_taps_go_to_the_quick_lane(self):
-        self.assertEqual((lane_for(tap(1, "retry:message:1", 9000)), lane_for(update(2, "ciao"))),
-                         ("commands", "acquisition"))
+    def test_taps_and_the_balance_go_to_the_quick_lane(self):
+        self.assertEqual([lane_for(u) for u in (tap(1, "retry:message:1", 9000), update(2, "/bilancio"),
+                                                update(3, "/balance@sazed_bot"), update(4, "ciao"))],
+                         ["commands", "commands", "commands", "acquisition"])
 
     async def test_an_old_or_foreign_tap_retries_nothing(self):
         self.telegram.rule(lambda m, prm: 400 if text_has("non conosco")(m, prm) else None)
@@ -952,6 +954,75 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.items()[0].extraction == "complete")
         self.assertEqual(self.reactions(10), ["👍", "🤷", "👍"])
         self.assertIn("Torta di mele", self.items()[0].title)
+
+    async def test_the_balance_counts_and_leads_to_what_needs_a_retry(self):
+        broken = [True]
+        self.telegram.rule(lambda m, prm: 500 if broken[0] and text_has("non conosco")(m, prm) else None)
+        self.web.route("https://example.com/giu", 503)
+        self.web.route("https://example.com/via", 410)
+        p = await self.start(self.processor(reads=True))
+        for upd in (update(1, "/aiuto"), update(2, "https://example.com/giu"), update(3, "https://example.com/via")):
+            self.record(p, upd)
+        await self.until(lambda: self.state(1) == "failed" and len(self.items()) == 2
+                         and all(i.extraction != "pending" for i in self.items()))
+        self.record(p, update(4, "/bilancio"))
+        await self.until(lambda: self.state(4) == "done")
+        self.assertEqual(self.replies()[-1], "Ciao Ada, finora mi hai mandato 3 messaggi.\n✅ Elaborati: 2\n"
+                         "🔁 Da riprovare: 2 (1 messaggio messo da parte, 1 fonte non letta per un problema passeggero)\n"
+                         "⛔ Fonti non recuperabili: 1 (sparite, o in un formato che non so leggere)")
+        balance = self.telegram.ok_calls("sendMessage")[-1][1]
+        self.assertEqual([b["callback_data"] for b in balance["reply_markup"]["inline_keyboard"][0]],
+                         ["show:retry", "retry:all"])
+        notice = 9000 + len(self.telegram.ok_calls("sendMessage")) - 1
+        # Mostrameli: una risposta a ciascuno, con il suo Riprova
+        self.record(p, tap(5, "show:retry", notice))
+        await self.until(lambda: self.state(5) == "done")
+        pointers = [prm for _, prm in self.telegram.ok_calls("sendMessage") if prm["text"] == "🔁 Questo è da riprovare."]
+        giu = [i for i in self.items() if i.url.endswith("/giu")][0]
+        self.assertEqual(sorted((prm["reply_parameters"]["message_id"],
+                                 prm["reply_markup"]["inline_keyboard"][0][0]["callback_data"]) for prm in pointers),
+                         [(10, "retry:message:1"), (20, f"retry:item:{giu.id}")])
+        # Riprova tutti: il messaggio messo da parte e la fonte ripartono
+        broken[0] = False
+        self.web.page("https://example.com/giu", ARTICLE)
+        self.record(p, tap(6, "retry:all", notice))
+        await self.until(lambda: self.state(1) == "done" and self.memory.get(giu.id).extraction == "complete")
+        answers = [prm["text"] for _, prm in self.telegram.ok_calls("answerCallbackQuery")]
+        self.assertEqual(answers, ["Te ne mostro 2.", "Ne riprovo 2."])
+        self.record(p, update(7, "/bilancio"))
+        await self.until(lambda: self.state(7) == "done")
+        self.assertEqual(self.replies()[-1], "Ciao Ada, finora mi hai mandato 3 messaggi.\n✅ Elaborati: 3\n"
+                         "🔁 Niente da riprovare\n⛔ Fonti non recuperabili: 1 (sparite, o in un formato che non so leggere)")
+        self.assertNotIn("reply_markup", self.telegram.ok_calls("sendMessage")[-1][1])
+
+    async def test_show_them_goes_further_back_a_page_at_a_time(self):
+        for n in (1, 2, 3):
+            self.web.route(f"https://example.com/giu/{n}", 503)
+        p = await self.start(self.processor(reads=True))
+        for n in (1, 2, 3):
+            self.record(p, update(n, f"https://example.com/giu/{n}"))
+        await self.until(lambda: len(self.items()) == 3 and all(i.retryable for i in self.items()))
+        sent = lambda: [prm for _, prm in self.telegram.ok_calls("sendMessage")]
+        pointed = lambda: [prm["reply_parameters"]["message_id"] for prm in sent()
+                           if prm["text"] == "🔁 Questo è da riprovare."]
+        with mock.patch.object(lanes, "SHOW_MAX", 2):
+            self.record(p, tap(4, "show:retry", 9999))
+            await self.until(lambda: self.state(4) == "done")
+            self.assertEqual(pointed(), [30, 20])  # dal più recente
+            more = [(9000 + n, prm) for n, prm in enumerate(sent()) if prm["text"].startswith("Ce n")]
+            self.assertEqual([prm["text"] for _, prm in more], ["Ce n'è un altro, più indietro."])
+            further = more[0][1]["reply_markup"]["inline_keyboard"][0][0]
+            self.assertEqual(further["text"], "Più indietro")
+            self.record(p, tap(5, further["callback_data"], more[0][0]))
+            await self.until(lambda: self.state(5) == "done")
+            self.record(p, tap(6, "show:retry:non:è:un:segno", 9999))
+            await self.until(lambda: self.state(6) == "done")
+        self.assertEqual(pointed(), [30, 20, 10])
+        self.assertFalse([prm for prm in sent() if prm["text"].startswith("Ce n")][1:])  # più indietro non c'è altro
+        self.assertEqual([prm["text"] for _, prm in self.telegram.ok_calls("answerCallbackQuery")],
+                         ["Te ne mostro 2.", "Te ne mostro 1.", "Non c'è più nulla da riprovare."])
+        self.assertEqual([prm["message_id"] for _, prm in self.telegram.ok_calls("editMessageReplyMarkup")],
+                         [more[0][0], 9999])  # Più indietro serve una volta; un segno guasto sparisce
 
     async def test_a_source_that_is_gone_offers_no_retry(self):
         self.web.route("https://example.com/via", 410)

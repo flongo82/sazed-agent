@@ -49,6 +49,11 @@ CREATE INDEX IF NOT EXISTS inbox_due ON inbox (lane, state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS inbox_chat ON inbox (chat_id, received_at);
 """
 
+# I messaggi di una chat (?), ciascuno nella sua ultima versione: una modifica crea un altro ingresso.
+LATEST = ("i.lane = 'acquisition' AND i.chat_id = ? AND i.message_id IS NOT NULL AND i.update_id = ("
+          "SELECT update_id FROM inbox WHERE chat_id = i.chat_id AND message_id = i.message_id"
+          " ORDER BY received_at DESC, update_id DESC LIMIT 1)")
+
 # Colonne aggiunte dopo la prima versione: i registri di prima le ricevono all'avvio.
 ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT", "send_back": "TEXT", "unknown": "TEXT"}
 
@@ -264,6 +269,22 @@ class Journal:
                 " updated_at = ? WHERE update_id = ?",
                 (str(error)[:500], self.clock(), update_id),
             )
+
+    def balance(self, chat_id):
+        """I messaggi della chat (non i comandi né i tocchi sui pulsanti), ciascuno nell'ultima
+        versione se è stato modificato, contati per stato."""
+        rows = self.db.execute(f"SELECT state, COUNT(*) FROM inbox AS i WHERE {LATEST} GROUP BY state",
+                               (chat_id,)).fetchall()
+        counts = {state: 0 for state in STATES}
+        counts.update({state: n for state, n in rows})
+        return counts
+
+    def set_aside(self, chat_id, limit=None):
+        """I messaggi della chat messi da parte dopo i tentativi, i più recenti per primi."""
+        rows = self.db.execute(f"SELECT * FROM inbox AS i WHERE {LATEST} AND state = 'failed'"
+                               " ORDER BY received_at DESC, update_id DESC LIMIT ?",
+                               (chat_id, -1 if limit is None else limit)).fetchall()
+        return [_entry(r) for r in rows]
 
     def reopen(self, update_id, chat_id):
         """Un messaggio in errore della chat chat_id, che l'utente chiede di riprovare, torna da

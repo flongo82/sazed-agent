@@ -5,6 +5,20 @@ saluto per nome e poi il fatto, nome del comando di stato preso da qui. Per aggi
 lingua basta aggiungere un blocco: i test controllano che abbia tutte le chiavi.
 """
 
+def _it_retry(set_aside, sources):
+    parts = [f"{set_aside} {'messaggio messo' if set_aside == 1 else 'messaggi messi'} da parte" if set_aside else None,
+             f"{sources} {'fonte non letta' if sources == 1 else 'fonti non lette'} per un problema passeggero"
+             if sources else None]
+    return f"🔁 Da riprovare: {set_aside + sources} ({', '.join(p for p in parts if p)})"
+
+
+def _en_retry(set_aside, sources):
+    parts = [f"{set_aside} {'message' if set_aside == 1 else 'messages'} set aside" if set_aside else None,
+             f"{sources} {'source' if sources == 1 else 'sources'} not read because of a passing problem"
+             if sources else None]
+    return f"🔁 To retry: {set_aside + sources} ({', '.join(p for p in parts if p)})"
+
+
 MESSAGES = {
     "it": {
         "hello": lambda first=None: f"Ciao {first}" if first else "Ciao",
@@ -15,6 +29,22 @@ MESSAGES = {
         "retry": "Riprova",
         "retrying": "Riprovo.",
         "nothing_to_retry": "Non c'è più nulla da riprovare.",
+        "balance": lambda sent, done, working, set_aside, sources, lost: "\n".join(line for line in (
+            f"finora mi hai mandato {sent} {'messaggio' if sent == 1 else 'messaggi'}.",
+            f"✅ Elaborati: {done}",
+            f"⏳ In lavorazione: {working}" if working else None,
+            _it_retry(set_aside, sources) if set_aside + sources else "🔁 Niente da riprovare",
+            f"⛔ Fonti non recuperabili: {lost} (sparite, o in un formato che non so leggere)" if lost else None)
+            if line),
+        "show_them": "Mostrameli",
+        "retry_all": "Riprova tutti",
+        "to_retry": "🔁 Questo è da riprovare.",
+        "showing": lambda n: f"Te ne mostro {n}.",
+        "older": lambda n: "Ce n'è un altro, più indietro." if n == 1 else f"Ce ne sono altri {n}, più indietro.",
+        "further_back": "Più indietro",
+        "retrying_many": lambda n: "Riprovo." if n == 1 else f"Ne riprovo {n}.",
+        "balance_command": "bilancio",
+        "balance_description": "Quanti messaggi ho elaborato, quanti sono da riprovare",
         "unknown": "di questo non sono riuscito a capire di che cosa parla: scrivimi due parole e le terrò insieme.",
         "unreadable": ("questo non sono riuscito a leggerlo, quindi non so di che cosa parla: scrivimi due "
                        "parole e le terrò insieme."),
@@ -41,6 +71,22 @@ MESSAGES = {
         "retry": "Retry",
         "retrying": "Trying again.",
         "nothing_to_retry": "There is nothing left to retry.",
+        "balance": lambda sent, done, working, set_aside, sources, lost: "\n".join(line for line in (
+            f"so far you have sent me {sent} {'message' if sent == 1 else 'messages'}.",
+            f"✅ Processed: {done}",
+            f"⏳ In progress: {working}" if working else None,
+            _en_retry(set_aside, sources) if set_aside + sources else "🔁 Nothing to retry",
+            f"⛔ Sources lost: {lost} (gone, or in a format I cannot read)" if lost else None)
+            if line),
+        "show_them": "Show them",
+        "retry_all": "Retry all",
+        "to_retry": "🔁 This one is to retry.",
+        "showing": lambda n: f"Showing {n}.",
+        "older": lambda n: "There is one more, further back." if n == 1 else f"There are {n} more, further back.",
+        "further_back": "Further back",
+        "retrying_many": lambda n: "Trying again." if n == 1 else f"Trying {n} again.",
+        "balance_command": "balance",
+        "balance_description": "How many messages I processed, how many to retry",
         "unknown": "I couldn't tell what this is about: write me a few words and I'll keep them with it.",
         "unreadable": ("I couldn't read this, so I don't know what it is about: write me a few words and I'll keep "
                        "them with it."),
@@ -62,6 +108,8 @@ MESSAGES = {
 
 # Il comando di stato in ogni lingua del catalogo (/stato, /status), qualunque sia la lingua.
 STATUS_COMMANDS = frozenset(f"/{t['status_command']}" for t in MESSAGES.values())
+# E quello del bilancio (/bilancio, /balance).
+BALANCE_COMMANDS = frozenset(f"/{t['balance_command']}" for t in MESSAGES.values())
 
 
 def language_for(setting, language_code=None):

@@ -37,12 +37,14 @@ class Telegram:
     def __init__(self, api_base, token, timeout=30):
         self.api_base, self.token, self.timeout = api_base.rstrip("/"), token, timeout
 
-    async def send_message(self, chat_id, text, reply_to=None, button=None):
-        """Manda un messaggio, in risposta a reply_to se c'è, con un pulsante sotto se button è
-        (testo, dati che tornano quando lo si tocca). Restituisce il suo message_id."""
+    async def send_message(self, chat_id, text, reply_to=None, buttons=()):
+        """Manda un messaggio, in risposta a reply_to se c'è, con dei pulsanti sotto, in fila:
+        buttons è un elenco di (testo, dati che tornano quando lo si tocca). Restituisce il suo
+        message_id."""
         params = _replying({"chat_id": chat_id, "text": text}, reply_to)
-        if button:
-            params["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "callback_data": button[1]}]]}
+        if buttons:
+            params["reply_markup"] = {"inline_keyboard": [[{"text": text, "callback_data": data}
+                                                           for text, data in buttons]]}
         result = await self.call("sendMessage", params)
         return result["message_id"]
 

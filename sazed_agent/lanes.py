@@ -1,9 +1,11 @@
 """Le corsie dell'agente: ogni messaggio preso in carico subito, i contenuti letti con calma, e
 le domande che non aspettano dietro una lettura lunga.
 
-- comandi: /stato, risposto subito, e i tocchi sui pulsanti (Riprova, sotto l'avviso di un
-  messaggio messo da parte o di una fonte non letta per un problema passeggero): il messaggio o
-  la lettura ripartono da capo, con i tentativi azzerati;
+- comandi: /stato e /bilancio, risposti subito, e i tocchi sui pulsanti: Riprova, sotto
+  l'avviso di un messaggio messo da parte o di una fonte non letta per un problema passeggero
+  (il messaggio o la lettura ripartono da capo, con i tentativi azzerati), e sotto il bilancio
+  Mostrameli (sazed risponde a ciascuno da riprovare, così toccando la citazione lo si ritrova)
+  e Riprova tutti;
 - ingresso (stati received e read): 👍 appena il messaggio arriva, poi link e file in
   coppermind (read); Claude dice a che cosa servono le parole, nel filo della conversazione:
   una nota, un commento a elementi di questo messaggio o di uno di poco prima, una domanda; il
@@ -53,7 +55,7 @@ from . import intake
 from .claude import ClaudeError, Interpretation, view
 from .coppermind import FILES, Coppermind, Draft, parse_link, unique
 from .meaning import MeaningError, card
-from .messages import STATUS_COMMANDS, language_for, messages_for
+from .messages import BALANCE_COMMANDS, STATUS_COMMANDS, language_for, messages_for
 from .reader import IMAGE_TYPES, MAX_IMAGE, Extract, ReadError
 from .telegram import FILE_MAX, TelegramError
 
@@ -64,6 +66,7 @@ INTAKE, ANSWERS = ("received", "read"), ("saved", "answered")
 THREAD_WINDOW, THREAD_LIMIT = 3 * 3600, 10   # il filo: i messaggi delle ultime ore, fino a dieci
 READ_WAIT = 600     # quanto una domanda aspetta la lettura degli elementi di cui parla
 MEANING_BATCH = 8   # schede calcolate insieme
+SHOW_MAX = 10       # quanti da riprovare Mostrameli indica per volta; poi «Più indietro» per gli altri
 MEANING_PAUSE = 300 # dopo un errore di llama-server, prima di riprovare
 # Le piattaforme di cui il video si scarica solo se l'anteprima non basta: meno richieste, e
 # Instagram limita chi ne fa troppe senza account.
@@ -77,15 +80,24 @@ SPOKEN = ("voice", "video_note")  # l'utente che parla, se non sono inoltrati
 
 
 def lane_for(update):
-    """"commands" per il comando di stato in qualunque lingua e per i tocchi sui pulsanti,
-    "acquisition" per tutto il resto."""
+    """"commands" per i comandi di stato e di bilancio in qualunque lingua e per i tocchi sui
+    pulsanti, "acquisition" per tutto il resto."""
     if "callback_query" in update:
         return "commands"
+    return "commands" if _command_of(update) in STATUS_COMMANDS | BALANCE_COMMANDS else "acquisition"
+
+
+def _cursor(text):
+    """Il segno di «Più indietro» (":messaggio:tipo:numero"), o None se non è valido."""
+    _, message_id, kind, ref = (text.split(":") + [""] * 4)[:4]
+    if text.count(":") == 3 and message_id.isdigit() and kind in ("message", "item") and ref.isdigit():
+        return int(message_id), kind, int(ref)
+    return None
+
+
+def _command_of(update):
     text = (_message(update).get("text") or "").strip()
-    if not text.startswith("/"):
-        return "acquisition"
-    command = text.split()[0].split("@")[0].lower()
-    return "commands" if command in STATUS_COMMANDS else "acquisition"
+    return text.split()[0].split("@")[0].lower() if text.startswith("/") else None
 
 
 def _message(update):
@@ -548,7 +560,7 @@ class Processor:
         try:
             reply_id = await self.telegram.send_message(
                 item.chat_id, f"{hello}, {text}", reply_to=item.message_id,
-                button=(t["retry"], f"retry:item:{item.id}") if retry else None)
+                buttons=((t["retry"], f"retry:item:{item.id}"),) if retry else ())
         except TelegramError as err:
             log.warning("elemento %s: avviso di contenuto incomprensibile non inviato: %s", item.id, err)
             return
@@ -686,41 +698,95 @@ class Processor:
             self.journal.advance(entry.update_id, "done")
             log.info("elemento %s completato: pulsante", entry.update_id)
             return
+        balance = _command_of(entry.update) in BALANCE_COMMANDS
         if entry.reply_message_id is None:
             t, hello = self._voice(entry)
-            counts = self.journal.counts("acquisition")
-            pending = sum(counts[state] for state in ACTIVE)
-            text = f"{hello}, {t['status'](self.bot_name, pending, counts['failed'], self.memory.count())}"
-            reply_id = await self.telegram.send_message(entry.chat_id, text, reply_to=entry.message_id)
+            buttons = ()
+            if balance:
+                counts, readings = self.journal.balance(entry.chat_id), self.memory.readings(entry.chat_id)
+                text = t["balance"](sum(counts.values()), counts["done"], sum(counts[s] for s in ACTIVE),
+                                    counts["failed"], readings["retry"], readings["lost"])
+                if counts["failed"] + readings["retry"]:
+                    buttons = ((t["show_them"], "show:retry"), (t["retry_all"], "retry:all"))
+            else:
+                counts = self.journal.counts("acquisition")
+                text = t["status"](self.bot_name, sum(counts[s] for s in ACTIVE), counts["failed"], self.memory.count())
+            reply_id = await self.telegram.send_message(entry.chat_id, f"{hello}, {text}", reply_to=entry.message_id,
+                                                        buttons=buttons)
             self.journal.set_reply(entry.update_id, reply_id)
         self.journal.advance(entry.update_id, "done")
-        log.info("elemento %s completato: stato inviato", entry.update_id)
+        log.info("elemento %s completato: %s inviato", entry.update_id, "bilancio" if balance else "stato")
 
     async def _button(self, entry):
-        """Il tocco di Riprova: il messaggio messo da parte (o la lettura fallita) della stessa chat
-        riparte da capo, e 👍 torna sul messaggio. Si risponde subito al tocco e il pulsante sparisce,
-        così un secondo tocco non riprova due volte; un pulsante vecchio dice che non c'è più nulla."""
+        """Il tocco di un pulsante, solo dalla stessa chat. Riprova: il messaggio messo da parte (o
+        la lettura fallita) riparte da capo, e 👍 torna sul messaggio; Riprova tutti: lo stesso per
+        tutti quelli da riprovare. Si risponde subito al tocco e il pulsante sparisce, così un
+        secondo tocco non riprova due volte; un pulsante vecchio dice che non c'è più nulla.
+        Mostrameli: sazed risponde a ciascuno da riprovare, SHOW_MAX per volta, con il suo Riprova;
+        Più indietro: i successivi, andando indietro nella chat."""
         query = entry.update["callback_query"]
         message = query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
         t = messages_for(self.language, (query.get("from") or {}).get("language_code"))
-        kind, _, ref = (query.get("data") or "").removeprefix("retry:").partition(":")
-        again = None
-        if (query.get("data") or "").startswith("retry:") and ref.isdigit():
+        data = query.get("data") or ""
+        if data.startswith("show:retry"):
+            cursor = data.removeprefix("show:retry")
+            before = _cursor(cursor)
+            shown = 0
+            if chat_id is not None and (before is not None or not cursor):
+                shown = await self._show_retry(chat_id, t, before)
+            with contextlib.suppress(TelegramError):
+                await self.telegram.answer_button(query.get("id"),
+                                                  t["showing"](shown) if shown else t["nothing_to_retry"])
+            if cursor and chat_id is not None and message.get("message_id") is not None:
+                with contextlib.suppress(TelegramError):  # Più indietro serve una volta sola
+                    await self.telegram.remove_button(chat_id, message["message_id"])
+            return
+        again = []  # i messaggi (o gli elementi) di nuovo da elaborare
+        kind, _, ref = data.removeprefix("retry:").partition(":")
+        if data == "retry:all" and chat_id is not None:
+            again = [e for e in self.journal.set_aside(chat_id) if self.journal.reopen(e.update_id, chat_id)]
+            again += [i for i in self.memory.to_retry(chat_id) if self.memory.read_again(i.id, chat_id)]
+        elif data.startswith("retry:") and ref.isdigit():
             if kind == "message" and self.journal.reopen(int(ref), chat_id):
-                again = self.journal.get(int(ref))
+                again = [self.journal.get(int(ref))]
             elif kind == "item" and self.memory.read_again(int(ref), chat_id):
-                again = self.memory.get(int(ref))
+                again = [self.memory.get(int(ref))]
         with contextlib.suppress(TelegramError):
-            await self.telegram.answer_button(query.get("id"), t["retrying"] if again else t["nothing_to_retry"])
+            await self.telegram.answer_button(query.get("id"), t["retrying_many"](len(again)) if again
+                                              else t["nothing_to_retry"])
         if chat_id is not None and message.get("message_id") is not None:
             with contextlib.suppress(TelegramError):
                 await self.telegram.remove_button(chat_id, message["message_id"])
-        if again is not None:
-            await self._react(chat_id, again.message_id, self.reactions.received)
-            log.info("%s %s di nuovo da elaborare, come chiesto dall'utente", "messaggio" if kind == "message"
-                     else "elemento", ref)
+        for done in again:
+            await self._react(chat_id, done.message_id, self.reactions.received)
+        if again:
+            log.info("%d di nuovo da elaborare, come chiesto dall'utente", len(again))
             self.notify()
+
+    async def _show_retry(self, chat_id, t, before=None):
+        """Risponde a ciascun messaggio da riprovare (messo da parte, o con una fonte non letta per
+        un problema passeggero), SHOW_MAX per volta, dal più recente nella chat (o da prima di
+        before), con il suo Riprova: toccando la citazione, la chat salta al messaggio. Se ne
+        restano di più vecchi, lo dice con «Più indietro», che riparte dall'ultimo indicato: un
+        segno nella chat, non una posizione, così nessuno salta né si ripete se intanto altri
+        vengono riprovati. Quanti ne ha indicati."""
+        pending = [(e.message_id, "message", e.update_id) for e in self.journal.set_aside(chat_id)]
+        pending += [(i.message_id, "item", i.id) for i in self.memory.to_retry(chat_id) if i.message_id is not None]
+        pending = [p for p in sorted(pending, reverse=True) if before is None or p < before]
+        page, rest = pending[:SHOW_MAX], len(pending) - SHOW_MAX
+        shown = 0
+        for message_id, kind, ref in page:
+            with contextlib.suppress(TelegramError):
+                await self.telegram.send_message(chat_id, t["to_retry"], reply_to=message_id,
+                                                 buttons=((t["retry"], f"retry:{kind}:{ref}"),))
+                shown += 1
+        if shown and rest > 0:
+            last = ":".join(map(str, page[-1]))
+            with contextlib.suppress(TelegramError):
+                await self.telegram.send_message(chat_id, t["older"](rest),
+                                                 buttons=((t["further_back"], f"show:retry:{last}"),))
+        return shown
 
     async def _report_failure(self, entry):
         """Avvisa una volta sola che un messaggio è stato messo da parte, con Riprova. Se non
@@ -732,7 +798,7 @@ class Processor:
         try:
             await self.telegram.send_message(entry.chat_id, f"{hello}, {t['failed'](failed.attempts)}",
                                              reply_to=entry.message_id,
-                                             button=(t["retry"], f"retry:message:{entry.update_id}"))
+                                             buttons=((t["retry"], f"retry:message:{entry.update_id}"),))
         except TelegramError as err:
             log.warning("avviso di errore per %s non inviato: %s", entry.update_id, err)
         await self._react(entry.chat_id, entry.message_id, self.reactions.failed)

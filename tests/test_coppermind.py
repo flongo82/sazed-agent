@@ -188,6 +188,25 @@ class Saving(Base):
         self.assertEqual(self.memory.count(), 0)
 
 
+class Retryable(Base):
+    def test_only_readings_that_failed_for_a_passing_problem_are_to_retry(self):
+        def link(n):
+            return self.save(n, Draft("link", url=f"https://example.com/{n}"))[0].item
+        down, gone, odd, fine = link(10), link(11), link(12), link(13)
+        for _ in range(3):
+            self.memory.read_failed(down.id, "HTTP 503", (1, 1))  # tentativi finiti: si può riprovare
+        self.memory.read_failed(gone.id, "HTTP 410", (1, 1), final="unavailable")
+        self.memory.read_failed(odd.id, "formato che non so leggere", (1, 1), final="failed")
+        self.memory.read_done(fine.id, "complete")
+        self.assertEqual(self.memory.readings(42), {"retry": 1, "lost": 2})
+        self.assertEqual([i.id for i in self.memory.to_retry(42)], [down.id])
+        self.assertTrue(self.memory.get(down.id).retryable)
+        self.assertEqual(self.memory.readings(7), {"retry": 0, "lost": 0})  # un'altra chat
+        self.memory.read_again(down.id, 42)
+        self.assertFalse(self.memory.get(down.id).retryable)
+        self.assertEqual(self.memory.to_retry(42), [])
+
+
 class ReadAgain(Base):
     def test_only_a_failed_reading_of_the_same_chat_comes_back(self):
         [item] = [o.item for o in self.save(10, Draft("link", url="https://example.com/giu"))]
@@ -258,8 +277,15 @@ class Reading(Base):
             self.memory.read_done(out.item.id, "pending")
 
 
+def as_version_4(db):
+    """Riporta il catalogo com'era alla versione 4: senza le letture da riprovare."""
+    db.execute("ALTER TABLE items DROP COLUMN retryable")
+    db.execute("PRAGMA user_version = 4")
+
+
 def as_version_3(db):
     """Riporta il catalogo com'era alla versione 3: senza i significati."""
+    as_version_4(db)
     db.execute("DROP TRIGGER meanings_delete")
     db.execute("DROP TABLE meanings")
     db.execute("PRAGMA user_version = 3")
@@ -302,7 +328,7 @@ class Versions(unittest.TestCase):
         journal.record(7, update(1), "acquisition")
         self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 0)
         Coppermind(journal.db)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual(journal.get(1).state, "received")
         Coppermind(journal.db)  # una seconda apertura non cambia nulla
 
@@ -318,7 +344,7 @@ class Versions(unittest.TestCase):
             db.execute(f"ALTER TABLE items DROP COLUMN {column}")
         db.execute("PRAGMA user_version = 1")
         memory = Coppermind(db, clock=lambda: 100.0)
-        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
         item = memory.to_read(["link"])
         self.assertEqual((item.note, item.extraction, item.read_error), ("vecchio", "pending", None))
 
@@ -330,7 +356,7 @@ class Versions(unittest.TestCase):
         memory.read_done(old.id, "partial", title="Il pozzo dell'ascensione")
         as_version_2(journal.db)
         memory = Coppermind(journal.db, clock=lambda: 100.0)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual(memory.search("pozzo").total, 1)  # l'indice ricostruito trova ciò che c'era
         memory.read_done(old.id, "partial", authors=["Brandon Sanderson"])
         self.assertEqual([i.id for i in memory.search("sanderson").items], [old.id])
@@ -343,8 +369,19 @@ class Versions(unittest.TestCase):
         [note] = [o.item for o in memory.save(42, 10, 1, [Draft("note", note="riso")])]
         as_version_3(journal.db)
         memory = Coppermind(journal.db, clock=lambda: 100.0)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual([i.id for i in memory.to_mean("modello")], [note.id])
+
+    def test_a_catalogue_of_version_4_learns_which_readings_to_retry(self):
+        journal = Journal(self.dir / "coppermind.db")
+        self.addCleanup(journal.close)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        [link] = [o.item for o in memory.save(42, 10, 1, [Draft("link", url="https://example.com/giu")])]
+        memory.read_failed(link.id, "HTTP 503", (), final="failed")
+        as_version_4(journal.db)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(memory.readings(42), {"retry": 0, "lost": 1})  # di prima: non si sa, non si riprova
 
     def test_a_database_from_a_newer_version_is_refused(self):
         journal = Journal(self.dir / "coppermind.db")

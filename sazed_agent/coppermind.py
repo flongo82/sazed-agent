@@ -38,7 +38,7 @@ import numpy
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-VERSION = 4
+VERSION = 5
 SOURCES = ("note", "link", "photo", "video", "video_note", "voice", "audio", "document")
 FILES = SOURCES[2:]
 EXTRACTIONS = ("pending", "complete", "partial", "failed", "unavailable")
@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS items (
   read_attempts INTEGER NOT NULL DEFAULT 0,
   next_read_at  REAL    NOT NULL DEFAULT 0,
   read_error    TEXT,
-  read_full     INTEGER NOT NULL DEFAULT 0   -- 1: l'utente vuole che si legga tutto
+  read_full     INTEGER NOT NULL DEFAULT 0,  -- 1: l'utente vuole che si legga tutto
+  retryable     INTEGER NOT NULL DEFAULT 0   -- 1: lettura fallita per un problema passeggero: si può riprovare
 );
 CREATE UNIQUE INDEX IF NOT EXISTS items_note ON items (chat_id, message_id) WHERE origin IS NULL;
 CREATE INDEX IF NOT EXISTS items_message ON items (chat_id, message_id);
@@ -120,6 +121,7 @@ MIGRATIONS = {
         "DROP TRIGGER items_fts_insert", "DROP TRIGGER items_fts_delete", "DROP TRIGGER items_fts_update",
         "DROP TABLE items_fts"),
     4: (),  # la tabella dei significati, nuova: la crea lo schema
+    5: ("ALTER TABLE items ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0",),
 }
 
 # Peso di ogni colonna di items_fts nell'ordinamento per pertinenza (bm25).
@@ -195,6 +197,7 @@ class Item:
     saved_at: float
     read_error: str | None = None
     read_full: bool = False    # l'utente ha chiesto di leggerlo tutto
+    retryable: bool = False    # la lettura è fallita per un problema passeggero: si può riprovare
     updated_at: float = 0.0    # l'ultimo cambiamento: il significato calcolato prima va rifatto
 
 
@@ -383,7 +386,7 @@ class Coppermind:
                 " title = COALESCE(:title, title), kind = COALESCE(:kind, kind),"
                 " authors = COALESCE(:authors, authors),"
                 " topics = COALESCE(:topics, topics), summary = COALESCE(:summary, summary),"
-                " read_error = NULL, updated_at = :now WHERE id = :id",
+                " read_error = NULL, retryable = 0, updated_at = :now WHERE id = :id",
                 {"extraction": extraction, "content": content, "title": title, "kind": kind,
                  "authors": json.dumps(list(authors), ensure_ascii=False) if authors else None,
                  "topics": json.dumps(list(topics), ensure_ascii=False) if topics else None,
@@ -412,8 +415,24 @@ class Coppermind:
             if row is None or row["extraction"] != "failed" or row["chat_id"] != chat_id:
                 return False
             self.db.execute("UPDATE items SET extraction = 'pending', read_attempts = 0, next_read_at = ?,"
-                            " read_error = NULL, updated_at = ? WHERE id = ?", (self.clock(), self.clock(), item_id))
+                            " read_error = NULL, retryable = 0, updated_at = ? WHERE id = ?",
+                            (self.clock(), self.clock(), item_id))
         return True
+
+    def readings(self, chat_id):
+        """Come sono andate le letture della chat: quante sono da riprovare (fallite per un problema
+        passeggero) e quante sono perse (fonte sparita, o illeggibile per sempre)."""
+        retry, lost = self.db.execute(
+            "SELECT COALESCE(SUM(extraction = 'failed' AND retryable), 0),"
+            " COALESCE(SUM(extraction = 'unavailable' OR extraction = 'failed' AND NOT retryable), 0)"
+            " FROM items WHERE chat_id = ?", (chat_id,)).fetchone()
+        return {"retry": retry, "lost": lost}
+
+    def to_retry(self, chat_id, limit=None):
+        """Gli elementi della chat la cui lettura è da riprovare, i più recenti per primi."""
+        rows = self.db.execute("SELECT * FROM items WHERE chat_id = ? AND extraction = 'failed' AND retryable"
+                               " ORDER BY sent_at DESC, id DESC LIMIT ?", (chat_id, -1 if limit is None else limit))
+        return [_item(r) for r in rows]
 
     def passages(self, item_id, text, limit=5):
         """I punti del testo letto di un elemento che parlano di più delle parole date (anche
@@ -441,20 +460,22 @@ class Coppermind:
 
     def read_failed(self, item_id, error, delays, min_delay=0, final=None):
         """Una lettura non è riuscita. Con final ("unavailable" o "failed") è l'esito definitivo;
-        altrimenti si riprova dopo l'attesa successiva, e finite le attese l'esito è "failed".
-        Restituisce lo stato di lettura risultante."""
+        altrimenti si riprova dopo l'attesa successiva, e finite le attese l'esito è "failed", ma
+        si può riprovare (retryable): il problema era passeggero. Restituisce lo stato di lettura
+        risultante."""
         with transaction(self.db):
             row = self.db.execute("SELECT read_attempts FROM items WHERE id = ?", (item_id,)).fetchone()
             if row is None:
                 return None
             attempts, now = row[0] + 1, self.clock()
-            if final is None and attempts > len(delays):
+            retryable = final is None and attempts > len(delays)
+            if retryable:
                 final = "failed"
             next_at = now if final else now + max(delays[attempts - 1], min_delay or 0)
             self.db.execute(
                 "UPDATE items SET read_attempts = ?, next_read_at = ?, read_error = ?,"
-                " extraction = COALESCE(?, extraction), updated_at = ? WHERE id = ?",
-                (attempts, next_at, str(error)[:500], final, now, item_id))
+                " extraction = COALESCE(?, extraction), retryable = ?, updated_at = ? WHERE id = ?",
+                (attempts, next_at, str(error)[:500], final, int(retryable), now, item_id))
         return final or "pending"
 
     def read_later(self, item_id, seconds, error):
@@ -655,6 +676,7 @@ def _item(row):
         latitude=row["latitude"], longitude=row["longitude"], taken_at=row["taken_at"],
         media=json.loads(row["media"]) if row["media"] else {}, sent_at=row["sent_at"],
         saved_at=row["saved_at"], read_error=row["read_error"], read_full=bool(row["read_full"]),
+        retryable=bool(row["retryable"]),
         updated_at=row["updated_at"],
     )
 

@@ -55,6 +55,10 @@ which coppermind indexes with the text. A source that cannot be read gets 🤷 o
 sazed cannot tell what something is about, and you wrote nothing with it, it says so and asks you
 for a few words: they are kept with it. A message set aside after its attempts, or a source that
 could not be read because of a passing problem, comes with a Retry button that starts it over.
+`/bilancio` (`/balance`) counts the messages you sent, those processed, those to retry and the
+sources that cannot be recovered; with something to retry, it offers Retry all, and Show them,
+which replies to each with its own Retry button, ten at a time from the most recent: tap the
+quote and the chat jumps to the message.
 
 **Answers questions** in the chat, looking into coppermind with read-only tools: exact
 filters and words, meaning (so "desserts that need no oven" finds a tiramisù, even saved with
