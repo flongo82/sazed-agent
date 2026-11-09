@@ -26,6 +26,13 @@ args=("$@")
 # such as check, runs beside it without stopping it.
 name=sazed-agent
 [ "${args[0]}" = run ] || name="sazed-agent-${args[0]}"
+# Installed as a service (scripts/install-service.sh), the agent is systemd's: starting it here too
+# would take its container away.
+if [ "$name" = sazed-agent ] && command -v systemctl >/dev/null \
+   && systemctl --user is-active --quiet sazed-agent.service 2>/dev/null; then
+  echo "The agent runs as a service: systemctl --user restart sazed-agent (logs: journalctl --user -u sazed-agent -f)." >&2
+  exit 1
+fi
 
 # --tz local: i log con l'ora del computer, non quella UTC dell'immagine.
 podman run --rm --name "$name" --replace --userns keep-id --tz local \

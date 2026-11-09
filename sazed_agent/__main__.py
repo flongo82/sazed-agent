@@ -155,8 +155,8 @@ def _has_session(path):
 
 def instagram_status(config):
     if instagram_cookies(config) is not None:
-        return "account secondario pronto, dei reel si leggono anche video e audio"
-    return "solo l'anteprima pubblica (per video e audio dei reel: scripts/setup-instagram.sh)"
+        return "con i cookie dell'account secondario"
+    return "senza account: didascalia e copertina, e il video quando non bastano e Instagram lo dà"
 
 
 def meanings_for(config):

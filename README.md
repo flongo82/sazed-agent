@@ -63,8 +63,8 @@ back into the chat.
 
 ## Status
 
-Working end to end with `sazed-bot`. Not there yet: the place and date of photos (EXIF), and
-running as a system service.
+Working end to end with `sazed-bot`, and it can run as a service of your user. Not there yet:
+the place and date of photos (EXIF), and backups of the catalogue.
 
 ## Getting started
 
@@ -87,7 +87,9 @@ scripts/setup-mtproto.sh  # asks for the api_id and api_hash of an application c
 scripts/build.sh          # builds the sazed-agent image (podman rmi sazed-agent removes it)
 scripts/test.sh           # runs the tests in the container, without network access
 scripts/run.sh check      # verifies configuration and secrets, without connecting to anything
-scripts/run.sh            # starts the agent (podman stop sazed-agent stops it)
+scripts/run.sh            # starts the agent by hand (podman stop sazed-agent stops it)
+scripts/install-service.sh  # runs it as a service of your user instead (Podman Quadlet and
+                          # systemd): it starts at login, restarts if it fails; --remove removes it
 scripts/contract-test.sh  # the agent against the Worker's code in wrangler dev, with Node and
                           # wrangler from ../sazed-bot (read-only) and no network access
 ```
@@ -114,6 +116,11 @@ agent, so that you can revoke it on its own.
 Through MTProto the agent logs in with the bot token, never with your account: `api_id` and
 `api_hash` only identify the application. Its session is the one secret the agent writes, in
 `secrets/mtproto/`, the only part of `secrets/` mounted writable.
+
+As a service, the agent's logs are in `journalctl --user -u sazed-agent -f`; after
+`scripts/build.sh`, `systemctl --user restart sazed-agent` brings in the new image. It starts
+when you log in; to start it with the computer, before any login, enable lingering for your user
+(`loginctl enable-linger`).
 
 Run one agent per bot. If another agent connects to the same Worker, the Worker closes this
 one's connection (code 4000) and this one stops with exit code 2 instead of fighting back: two

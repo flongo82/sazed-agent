@@ -200,6 +200,46 @@ model = "{model}"
 """
 
 
+class InstallService(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.agent = self.root / "una cartella con spazi" / "sazed-agent"
+        (self.agent / "scripts").mkdir(parents=True)
+        (self.agent / "secrets").mkdir(mode=0o700)
+        shutil.copy(ROOT / "scripts" / "install-service.sh", self.agent / "scripts")
+        (self.agent / "config.toml").write_text(BEFORE_MTPROTO)
+
+    def unit(self, agent=None):
+        agent = agent or self.agent
+        return subprocess.run(["bash", str(agent / "scripts" / "install-service.sh"), "--print"],
+                              capture_output=True, text=True)
+
+    def test_the_unit_mounts_like_run_sh_and_never_fights_another_agent(self):
+        result = self.unit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        volumes = [line for line in result.stdout.splitlines() if line.startswith("Volume=")]
+        self.assertEqual(volumes, [f"Volume={self.agent}/config.toml:/app/config.toml:ro",  # spazi senza virgolette
+                                   f"Volume={self.agent}/secrets:/app/secrets:ro",
+                                   f"Volume={self.agent}/data:/app/data",
+                                   f"Volume={self.agent}/models:/app/models:ro"])
+        for line in ("Image=localhost/sazed-agent:latest", "ContainerName=sazed-agent", "UserNS=keep-id", "Exec=run",
+                     "Restart=on-failure", "RestartPreventExitStatus=2", "WantedBy=default.target"):
+            self.assertIn(line, result.stdout.splitlines())
+        (self.agent / "secrets" / "mtproto").mkdir(mode=0o700)  # la sessione MTProto, sola in scrittura
+        self.assertIn(f"Volume={self.agent}/secrets/mtproto:/app/secrets/mtproto", self.unit().stdout.splitlines())
+
+    def test_setup_comes_first_and_a_colon_cannot_be_mounted(self):
+        (self.agent / "config.toml").unlink()
+        self.assertIn("scripts/setup.sh", self.unit().stderr)
+        odd = self.root / "a:b" / "sazed-agent"
+        shutil.copytree(self.agent, odd)
+        (odd / "config.toml").write_text(BEFORE_MTPROTO)
+        result = self.unit(odd)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("colon", result.stderr)
+
+
 class SetupInstagram(unittest.TestCase):
     def setUp(self):
         self.agent = Path(tempfile.mkdtemp())

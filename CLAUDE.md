@@ -108,7 +108,10 @@ scripts/build.sh                   # immagine sazed-agent (Ubuntu 26.04 + apt)
 scripts/test.sh                    # tutti i test nel container, senza rete
 scripts/test.sh tests.test_journal # un solo modulo di test
 scripts/contract-test.sh           # agente contro il Worker in wrangler dev (Node di ../sazed-bot)
-scripts/run.sh                     # avvia l'agente nel container (podman stop sazed-agent)
+scripts/run.sh                     # avvia l'agente a mano nel container (podman stop sazed-agent)
+scripts/install-service.sh         # l'agente come servizio dell'utente (Quadlet): --remove, --print
+systemctl --user restart sazed-agent   # dopo scripts/build.sh, con il servizio
+journalctl --user -u sazed-agent -f    # i log del servizio
 scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente acceso)
 ```
 
@@ -116,6 +119,11 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
 
 - Il protocollo WebSocket con `sazed-bot` è un contratto: se lo cambi, aggiorna anche
   `sazed-bot` (codice, test e README) e `architettura.md`, e segnalalo.
+- L'agente gira come servizio dell'utente (`scripts/install-service.sh`, Podman Quadlet): il file
+  dell'unità, con il percorso della cartella, sta in `~/.config/containers/systemd/`, mai nel
+  repository. Riparte dopo un errore in 30 s, ma non con il codice 2; con il servizio attivo
+  `scripts/run.sh` si rifiuta di avviare un secondo agente. Il linger (avvio prima del login) lo
+  decide l'utente.
 - Un solo agente per Worker: sul codice 4000 (un altro agente ha preso il posto di questo)
   l'agente si ferma con il codice di uscita 2, senza ricollegarsi. I frame del Worker che non
   sono oggetti JSON si ignorano.
