@@ -58,9 +58,25 @@ class LookupTest(unittest.IsolatedAsyncioTestCase):
         self.json(f"https://api.crossref.org/works?{urlencode(query)}", {"message": {"items": [{
             "title": ["Notes on the Engine"], "author": [{"given": "Ada", "family": "Lovelace"}],
             "issued": {"date-parts": [[1843, 9]]}, "abstract": "<jats:p>A machine that weaves numbers.</jats:p>"}]}})
+        self.books([], title="Notes on the Engine", author="Ada Lovelace")
+        self.books([], limit=5, title="Notes on the Engine")
+        self.books([], limit=20, author="Ada Lovelace")
         found = await self.lookup.find("Notes on the Engine", ["Ada Lovelace"], "article", "en")
         self.assertEqual(found, [{"source": "Crossref", "title": "Notes on the Engine",
                                   "text": "A machine that weaves numbers.", "authors": ["Ada Lovelace"], "year": 1843}])
+
+    async def test_an_essay_named_as_an_article_is_also_looked_for_among_the_books(self):
+        query = {"query.bibliographic": "End Times Fascism", "rows": 1, "select": "DOI,title,author,abstract,issued",
+                 "query.author": "Naomi Klein"}
+        self.json(f"https://api.crossref.org/works?{urlencode(query)}", {"message": {"items": []}})
+        self.books([{"key": "/works/OL5W", "title": "End Times Fascism", "author_name": ["Naomi Klein", "Astra Taylor"],
+                     "first_publish_year": 2026}], title="End Times Fascism", author="Naomi Klein")
+        self.json("https://openlibrary.org/works/OL5W.json", {})
+        for words in ("End Times Fascism", "End Times Fascism Naomi Klein"):
+            self.wikipedia("en", words, before=["Naomi Klein"])
+        found = await self.lookup.find("End Times Fascism", ["Naomi Klein", "Astra Taylor"], "article", "en")
+        self.assertEqual(found, [{"source": "Open Library", "title": "End Times Fascism",
+                                  "authors": ["Naomi Klein", "Astra Taylor"], "year": 2026}])
 
     async def test_wikipedia_tries_title_and_author_then_english_and_skips_disambiguations(self):
         self.wikipedia("it", "Mistborn", "Mistborn", "Può riferirsi a:", kind="disambiguation")

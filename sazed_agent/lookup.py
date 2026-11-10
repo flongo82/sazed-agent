@@ -2,7 +2,8 @@
 articolo si conoscono titolo e autori, ma le prime pagine non dicono di che cosa parla.
 
 - Open Library, per i libri: la descrizione dell'opera;
-- Crossref, per gli articoli: l'abstract, quando l'editore lo deposita;
+- Crossref, per gli articoli: l'abstract, quando l'editore lo deposita (e poi Open Library: un
+  saggio nato come articolo diventa spesso un libro);
 - Wikipedia, per le opere note, prima nella lingua dell'utente e poi in inglese: l'inizio della
   voce, solo se il suo titolo è quello dell'opera (una ricerca trova anche voci che non c'entrano).
 
@@ -51,7 +52,9 @@ class Lookup:
         if not title:
             return []
         authors = [a for a in authors or () if isinstance(a, str) and a.strip()][:2]
-        sources = {"book": [self._open_library], "article": [self._crossref]}.get(kind, []) + [self._wikipedia]
+        # un saggio può essere un articolo e poi un libro: per un articolo si chiede anche a Open Library
+        sources = {"book": [self._open_library], "article": [self._crossref, self._open_library]}.get(kind, []) \
+            + [self._wikipedia]
         titles, found = [title], []
         for source in sources:
             try:
