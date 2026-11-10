@@ -65,8 +65,8 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
 - `sazed_agent/mtproto.py`: i file oltre i 20 MB via MTProto (Telethon, token del bot, senza
   aggiornamenti), a pezzi da 512 KB in quattro parti insieme; la sessione in `secrets/mtproto/`
 - `sazed_agent/meaning.py`: il significato dei testi: `llama-server` (llama.cpp) con il modello
-  di embedding, su un socket UNIX privato e con una chiave nuova a ogni avvio; la scheda di un
-  elemento (`card`)
+  di embedding, su un socket UNIX privato e con una chiave nuova a ogni avvio; parte alla prima
+  richiesta e si ferma dopo dieci minuti senza richieste; la scheda di un elemento (`card`)
 - `sazed_agent/claude.py`: l'API di Claude (SDK ufficiale): interpret (a che cosa servono le
   parole, nel filo), describe (dal contenuto letto), answer (strumenti di sola lettura su
   coppermind); risposte strutturate controllate prima dell'uso; errori come quelli di Telegram

@@ -151,7 +151,7 @@ stop it here first, then copy this folder with its `data/` and `secrets/`.
 | Documents | poppler for PDFs (the first page as an image, for scans); EPUB, DOCX and ODT with Python's standard library, with limits against archives that unroll beyond measure |
 | Large files | MTProto (Telethon) with the bot's token, up to 2 GB, four pieces at a time |
 | coppermind | A single SQLite file, shared with the journal so that saving an item and moving its message forward are one transaction: exact filters and full-text search (FTS5) |
-| Meaning | One vector per item from its card (title, authors, topics, summary, note, the beginning of what was read), computed by Qwen3-Embedding-0.6B in `llama-server` on the processor, at low priority, over a private UNIX socket; compared with numpy |
+| Meaning | One vector per item from its card (title, authors, topics, summary, note, the beginning of what was read), computed by Qwen3-Embedding-0.6B in `llama-server` on the processor, at low priority, over a private UNIX socket; the server starts when needed and stops after ten idle minutes; compared with numpy |
 
 Only links, metadata and extracted text are kept: the sources stay where they are, and your
 files stay in the Telegram chat. Downloaded files live in a temporary folder that disappears

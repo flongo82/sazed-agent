@@ -1,6 +1,7 @@
 """Il significato dei testi con un finto llama-server: socket UNIX con chiave, vettori normalizzati,
 istruzione per le domande, priorità bassa, un server solo, errori; la scheda di un elemento."""
 
+import asyncio
 import json
 import os
 import shutil
@@ -58,6 +59,19 @@ class MeaningsTest(unittest.IsolatedAsyncioTestCase):
         await meanings.close()
         self.assertEqual((process.returncode is not None, work.exists()), (True, False))
         await meanings.vectors(["riso"])  # e riparte alla prossima richiesta
+        self.assertEqual(len([c for c in self.calls() if "args" in c]), 2)
+
+    async def test_the_server_rests_when_nothing_is_asked_and_wakes_on_the_next_request(self):
+        meanings = self.meanings()
+        meanings.idle = 0.3
+        await meanings.vectors(["riso"])
+        process = meanings._process
+        await asyncio.sleep(0.15)
+        await meanings.vectors(["pane"])  # una richiesta prima del riposo lo rimanda
+        self.assertIs(meanings._process, process)
+        await asyncio.sleep(0.6)
+        self.assertEqual((process.returncode is not None, meanings._process, meanings._work), (True, None, None))
+        await meanings.vectors(["riso"])  # e riparte
         self.assertEqual(len([c for c in self.calls() if "args" in c]), 2)
 
     async def test_a_server_that_does_not_start_or_fails_is_a_meaning_error(self):

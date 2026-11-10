@@ -294,9 +294,11 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         videos = FakeVideos("Transcript:\noggi la pasta e patate")
         p = self.with_claude(reads=True, videos=videos)
         self.claude.on("describe", lambda m: fake_claude.description("recipe", "Pasta e patate", summary="Pasta e patate."))
-        await self.handle(update(1, url), processor=p)
-        await self.until(lambda: self.items()[0].extraction != "pending")
+        with self.assertLogs("sazed_agent.lanes", "INFO") as logs:
+            await self.handle(update(1, url), processor=p)
+            await self.until(lambda: self.items()[0].extraction != "pending")
         self.assertEqual((videos.urls, self.items()[0].summary), ([], "Pasta e patate."))
+        self.assertIn("la didascalia del reel basta, il video non si chiede", "\n".join(logs.output))
 
     async def test_a_reel_whose_caption_says_too_little_is_downloaded_without_an_account(self):
         url = self.reel("#food #yummy")
@@ -304,8 +306,12 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         p = self.with_claude(reads=True, videos=videos)
         self.claude.on("describe", lambda m: fake_claude.description(
             "recipe", "Pasta e patate", summary="Pasta e patate." if "Transcript" in m["content"] else None))
-        await self.handle(update(1, url), processor=p)
-        await self.until(lambda: self.items()[0].extraction != "pending")
+        with self.assertLogs("sazed_agent.lanes", "INFO") as logs:
+            await self.handle(update(1, url), processor=p)
+            await self.until(lambda: self.items()[0].extraction != "pending")
+        said = "\n".join(logs.output)
+        self.assertIn("didascalia e copertina del reel non bastano, si chiede il video", said)
+        self.assertIn("il video del reel è arrivato, senza account", said)
         [item] = self.items()
         self.assertEqual((videos.urls, item.summary), ([url], "Pasta e patate."))
         self.assertIn("oggi la pasta e patate", item.content)

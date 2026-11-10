@@ -515,9 +515,12 @@ class Processor:
             try:
                 description = await self._describe(item, extract)
                 if self._video_needed(item, extract, description):
+                    log.info("elemento %s: didascalia e copertina del reel non bastano, si chiede il video", item.id)
                     richer = await self._video_after_all(item, extract)
                     if richer is not None:
                         extract, description = richer, await self._describe(item, richer)
+                elif self._reel(item):
+                    log.info("elemento %s: la didascalia del reel basta, il video non si chiede", item.id)
             except ClaudeError as err:
                 if err.config_error:
                     log.error("lettura dell'elemento %s rimandata di %g s: %s", item.id, self.config_pause, err)
@@ -638,6 +641,7 @@ class Processor:
         except ReadError:
             if not (videos and platform in VIDEO_IF_NEEDED):
                 raise
+            log.info("elemento %s: l'anteprima del reel non si legge, si chiede il video", item.id)
             extract = await self._video_after_all(item, Extract(None, None, None, False))  # niente anteprima
             if extract is None:
                 raise
@@ -649,12 +653,16 @@ class Processor:
                 log.warning("elemento %s: del video resta l'anteprima (%s)", item.id, err)
         return extract
 
+    def _reel(self, item):
+        """True per un link di una piattaforma di cui il video si scarica solo se serve."""
+        current = self.memory.get(item.id)
+        return (self.videos is not None and current is not None and current.source == "link"
+                and current.platform in VIDEO_IF_NEEDED and current.platform in self.videos.platforms)
+
     def _video_needed(self, item, extract, description):
         """True se di un reel didascalia e copertina non bastano: Claude non ne capisce nulla o non
         ne sa fare un riassunto (senza Claude: se non c'è la didascalia)."""
-        current = self.memory.get(item.id)
-        if (self.videos is None or current is None or current.source != "link"
-                or current.platform not in VIDEO_IF_NEEDED or current.platform not in self.videos.platforms):
+        if not self._reel(item):
             return False
         if description is None:
             return not extract.text
@@ -664,10 +672,12 @@ class Processor:
         """Il video di un reel di cui l'anteprima non basta, chiesto senza account; None se
         Instagram non lo dà: resta l'anteprima."""
         try:
-            return await self.videos.read(self.memory.get(item.id).url, preview)
+            extract = await self.videos.read(self.memory.get(item.id).url, preview)
         except ReadError as err:
             log.warning("elemento %s: il video del reel non si scarica (%s), resta l'anteprima", item.id, err)
             return None
+        log.info("elemento %s: il video del reel è arrivato, senza account", item.id)
+        return extract
 
     async def _read_file(self, item):
         """Scarica il file da Telegram in una cartella temporanea e lo legge: una foto la
