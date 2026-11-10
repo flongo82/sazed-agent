@@ -139,6 +139,49 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("sazed_agent.claude", "WARNING"):
             self.assertIsNone(await self.claude.describe(item, extract, "it"))
 
+    async def test_the_careful_model_writes_the_cards_and_each_model_stands_in_for_the_other(self):
+        claude = Claude(KEY, self.fake.api_base, "claude-haiku-5-5", "claude-sonnet-5-5", timeout=5, max_retries=0)
+        self.addAsyncCleanup(claude.close)
+        item, extract = self.memory.get(self.link.id), Extract("Carbonara", None, "guanciale", True)
+        self.fake.on("describe", lambda m: description("recipe", "Carbonara"))
+        self.fake.on("interpret", lambda m: interpretation(note="spesa"))
+        await claude.describe(item, extract, "it")
+        await claude.interpret([], "spesa", [], "it")
+        self.assertEqual([(r["task"], r["body"]["model"]) for r in self.fake.requests],
+                         [("describe", "claude-sonnet-5-5"), ("interpret", "claude-haiku-5-5")])
+        answers = iter([{"note": 3}, interpretation(note="spesa")])  # fuori schema, poi giusta
+        self.fake.on("interpret", lambda m: next(answers))
+        with self.assertLogs("sazed_agent.claude", "WARNING") as logs:
+            self.assertEqual((await claude.interpret([], "spesa", [], "it")).note, "spesa")
+        self.assertEqual(logs.output, ["WARNING:sazed_agent.claude:interpretazione di claude-haiku-5-5 non "
+                                       "utilizzabile: ValidationError, string_type in note"])  # il perché, senza il testo
+        self.fake.stop_with("refusal")
+        with self.assertLogs("sazed_agent.claude", "WARNING") as logs:
+            self.assertEqual((await claude.describe(item, extract, "it")).title, "Carbonara")
+        self.assertIn("descrizione di claude-sonnet-5-5 finita con refusal", logs.output[0])
+        self.assertEqual([(r["task"], r["body"]["model"]) for r in self.fake.requests[2:]],
+                         [("interpret", "claude-haiku-5-5"), ("interpret", "claude-sonnet-5-5"),
+                          ("describe", "claude-sonnet-5-5"), ("describe", "claude-haiku-5-5")])
+
+    async def test_a_note_names_its_works_and_the_interpretation_says_to_look_them_up(self):
+        [note] = [o.item for o in self.memory.save(42, 30, 1_790_000_000, [Draft("note", note="Ricordami Dune")])]
+        works = [("Dune", ["Frank Herbert"], "book"), ("Dune", [], "other"), (" ", [], "book"),
+                 ("Dune Messiah", ["Frank Herbert"], "book"), ("Children of Dune", [], "book")]
+        self.fake.on("describe", lambda m: description("note", "Dune", works=works))
+        got = await self.claude.describe(note, Extract(None, None, "Ricordami Dune", True), "it")
+        self.assertEqual([(w.title, w.authors, w.kind) for w in got.works],
+                         [("Dune", ("Frank Herbert",), "book"), ("Dune", (), "other"),
+                          ("Dune Messiah", ("Frank Herbert",), "book")])  # al più tre, nessuna senza titolo
+        [message] = self.fake.messages("describe")
+        self.assertEqual((message["source"], message["note"], message["content"]), ("note", None, "Ricordami Dune"))
+        self.fake.on("interpret", lambda m: interpretation(note="Ricordami Dune", names_works=True))
+        meaning = await self.claude.interpret([], "Ricordami Dune", [], "it")
+        self.assertTrue(meaning.look_up)
+        self.assertEqual(Interpretation.from_dict(meaning.to_dict()), meaning)
+        self.assertFalse(Interpretation.from_dict({"note": "x"}).look_up)  # registrata prima di look_up
+        self.fake.on("interpret", lambda m: interpretation(question="che libri ho?", names_works=True))
+        self.assertFalse((await self.claude.interpret([], "che libri ho?", [], "it")).look_up)  # niente nota
+
     async def test_describing_reads_the_words_in_the_images_and_says_whether_it_understood(self):
         self.fake.on("describe", lambda m: description("recipe", "Pasta e patate", image_text="  PASTA E PATATE\n2 patate  ",
                                                        useful=True))

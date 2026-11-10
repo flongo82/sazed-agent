@@ -28,17 +28,20 @@ def plain(message):
 
 
 def interpretation(note=None, comment=None, comment_on=(), question=None, about=(), kind=None, title=None,
-                   topics=(), summary=None, keep_spoken=True, read_in_full=(), read_in_full_named=None):
+                   topics=(), summary=None, keep_spoken=True, read_in_full=(), read_in_full_named=None,
+                   names_works=False):
     return {"note": note, "note_kind": kind, "note_title": title, "note_topics": list(topics),
             "note_summary": summary, "comment": comment, "comment_on": list(comment_on),
             "question": question, "about": list(about), "read_in_full": list(read_in_full),
-            "read_in_full_named": read_in_full_named, "keep_spoken": keep_spoken}
+            "read_in_full_named": read_in_full_named, "keep_spoken": keep_spoken, "note_names_works": names_works}
 
 
 def description(kind="article", title=None, topics=(), summary=None, authors=(), published=False,
-                image_text=None, useful=True):
+                image_text=None, useful=True, works=()):
+    """works: le opere che una nota nomina, come (titolo, autori, tipo)."""
     return {"kind": kind, "title": title, "topics": list(topics), "summary": summary, "authors": list(authors),
-            "published": published, "image_text": image_text, "useful": useful}
+            "published": published, "image_text": image_text, "useful": useful,
+            "works": [{"title": t, "authors": list(a), "kind": k} for t, a, k in works]}
 
 
 def tool(name, arguments):

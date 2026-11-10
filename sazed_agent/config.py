@@ -31,6 +31,7 @@ class Reactions:
 class Claude:
     api_base: str
     model: str     # il modello si sceglie qui, a ogni richiesta: la chiave vale per tutti
+    careful_model: str  # quello che scrive le schede, e riprova quando model non dà una risposta usabile
 
 
 @dataclass(frozen=True)
@@ -152,7 +153,8 @@ def load(path):
         anthropic_api_key_file=_optional_path(root, secrets, "anthropic_api_key"),
         instagram_cookies_file=_optional_path(root, secrets, "instagram_cookies"),
         claude_settings=None if claude is None else Claude(
-            api_base=_text(claude, "api_base", "claude.").rstrip("/"), model=_text(claude, "model", "claude.")),
+            api_base=_text(claude, "api_base", "claude.").rstrip("/"), model=_text(claude, "model", "claude."),
+            careful_model=_text(claude, "careful_model" if "careful_model" in claude else "model", "claude.")),
         whisper=None if whisper is None else Whisper(root / _text(whisper, "model", "whisper."),
                                                      _threads(whisper, "whisper.")),
         embeddings=None if embeddings is None else Embeddings(root / _text(embeddings, "model", "embeddings."),

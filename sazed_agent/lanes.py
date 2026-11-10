@@ -76,6 +76,7 @@ LISTEN_WAIT = 3600  # quanto un vocale aspetta la trascrizione, anche dietro un 
 # guarda), vocali, audio e video con chi ascolta (Whisper), i documenti con chi li sfoglia.
 LINKS, PICTURES, RECORDINGS = ("link",), ("photo",), ("voice", "audio", "video", "video_note")
 PAPERS = ("document",)
+NOTES = ("note",)  # solo le note che nominano opere restano da leggere: la loro scheda nasce con i cataloghi
 SPOKEN = ("voice", "video_note")  # l'utente che parla, se non sono inoltrati
 
 
@@ -93,6 +94,11 @@ def _cursor(text):
     if text.count(":") == 3 and message_id.isdigit() and kind in ("message", "item") and ref.isdigit():
         return int(message_id), kind, int(ref)
     return None
+
+
+async def _read_note(item):
+    """Una nota non si scarica: è già tutta nelle sue parole."""
+    return Extract(None, None, item.note, True)
 
 
 def _command_of(update):
@@ -119,7 +125,7 @@ class Processor:
         self.lookup = lookup  # senza, di un libro senza abstract resta ciò che dicono le prime pagine
         self.big_files = big_files  # MTProto: senza, un file oltre i 20 MB non si scarica
         self.meanings = meanings  # senza, si cerca solo per parole
-        self.readable = ((LINKS if reader is not None else ()) + (PICTURES if claude is not None else ())
+        self.readable = ((LINKS if reader is not None else ()) + (PICTURES + NOTES if claude is not None else ())
                          + (RECORDINGS if listener is not None else ()) + (PAPERS if documents is not None else ()))
         self.bot_name, self.language, self.reactions = bot_name, language, reactions
         self.retry_delays, self.typing_interval, self.idle_wait = retry_delays, typing_interval, idle_wait
@@ -241,7 +247,8 @@ class Processor:
             if meaning.note:
                 d = meaning.description
                 described = {k: getattr(d, k) for k in ("kind", "title", "topics", "summary")} if d else {}
-                drafts.append(Draft("note", note=meaning.note, **described))
+                drafts.append(Draft("note", note=meaning.note, look_up=meaning.look_up and self.lookup is not None,
+                                    **described))
             self.memory.save(entry.chat_id, entry.message_id, self._sent_at(entry, reading), drafts)
             for item_id in meaning.comment_on:
                 if item_id not in mine:
@@ -249,7 +256,7 @@ class Processor:
             for item_id in meaning.read_in_full:  # la domanda che lo chiede aspetta la lettura
                 self.memory.read_in_full(item_id)
             self.journal.advance(entry.update_id, "saved")
-        if meaning.read_in_full:
+        if meaning.read_in_full or meaning.note and meaning.look_up:  # anche una nota che nomina opere
             self.wake["reading"].set()
         self.wake["meaning"].set()  # una nota o un commento nuovi
         log.info("elemento %s in coppermind: %d link e file, %s%s", entry.update_id, len(pairs), _summary(meaning),
@@ -483,7 +490,8 @@ class Processor:
 
     async def _read(self, item):
         try:
-            extract = await (self._read_link(item) if item.source == "link" else self._read_file(item))
+            extract = await (self._read_link(item) if item.source == "link" else _read_note(item)
+                             if item.source in NOTES else self._read_file(item))
         except Exception as err:  # anche un difetto nel codice: la corsia va avanti
             if not isinstance(err, (ReadError, TelegramError)):  # il download di un file da Telegram
                 log.exception("lettura dell'elemento %s: errore inatteso", item.id)
@@ -523,13 +531,15 @@ class Processor:
         d = description
         written = (d and d.image_text) or extract.screen_text  # la lettura di Claude, o quella di tesseract
         content = "\n\n".join(p for p in (extract.text, written and f"Text in the images:\n{written}") if p) or None
+        if item.source in NOTES:
+            content = None  # il testo di una nota è già la nota
         self.memory.read_done(item.id, "complete" if extract.complete else "partial", content=content,
                               title=(d and d.title) or extract.title, kind=d and d.kind,
                               topics=d.topics if d else (), summary=d and d.summary, authors=d.authors if d else ())
         log.info("elemento %s letto (%s)%s", item.id, "completo" if extract.complete else "in parte",
                  "" if d else ", senza descrizione")
         read_something = extract.text or extract.title or extract.images or extract.screen_text
-        if not read_something or d is not None and not d.useful:
+        if item.source not in NOTES and (not read_something or d is not None and not d.useful):
             await self._say_unknown(item, "unknown")  # non si è letto nulla, o nulla che dica qualcosa
         self._read_over()
 
@@ -570,13 +580,19 @@ class Processor:
 
     async def _describe(self, item, extract):
         """La descrizione di Claude. Di un'opera pubblicata letta solo in parte, se le prime pagine
-        non dicono di che cosa parla, Claude riguarda il documento con le schede trovate in rete."""
+        non dicono di che cosa parla, e delle opere che una nota (scritta o vocale) nomina, Claude
+        riguarda l'elemento con le schede trovate in rete."""
         language = self._item_language(item)
         whole = item.source in PAPERS and item.read_full
         d = await self.claude.describe(item, extract, language, whole=whole)
-        if d is None or whole or not d.published or d.summary or not d.title or self.lookup is None:
+        if d is None or whole or self.lookup is None:
             return d
-        found = await self.lookup.find(d.title, d.authors, d.kind, language)
+        if d.published and not d.summary and d.title:
+            found = await self.lookup.find(d.title, d.authors, d.kind, language)
+        elif d.works and item.source in NOTES + SPOKEN:
+            found = [card for w in d.works for card in await self.lookup.find(w.title, w.authors, w.kind, language)]
+        else:
+            return d
         if not found:
             return d
         log.info("elemento %s: %d schede trovate in rete", item.id, len(found))

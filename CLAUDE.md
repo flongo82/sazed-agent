@@ -54,7 +54,9 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
 - `sazed_agent/documents.py`: i documenti: dati del file e prime pagine, o tutto il testo su
   richiesta; PDF con poppler, EPUB, DOCX e ODT con la libreria standard e limiti sugli archivi
 - `sazed_agent/lookup.py`: le schede delle opere pubblicate da fonti libere (Open Library,
-  Crossref, Wikipedia), con uno User-Agent che dice chi chiama
+  Crossref, Wikipedia), con uno User-Agent che dice chi chiama: una voce di Wikipedia solo se il
+  titolo è quello dell'opera, un titolo sentito male ritrovato fra le opere del suo autore. Si
+  cercano per i documenti pubblicati senza abstract e per le opere che una nota nomina
 - `sazed_agent/videos.py`: i video con yt-dlp (senza configurazione, cache né playlist; gli
   errori non dicono quale video). Di YouTube descrizione, sottotitoli scritti o automatici della
   lingua parlata (mai le traduzioni), altrimenti l'audio per Whisper; dei reel di Instagram il
@@ -230,8 +232,10 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   finito un lavoro. Se cambia il protocollo, o il modo in cui l'agente lo usa, deve passare
   anche `scripts/contract-test.sh`. I test non dipendono da Telegram, Cloudflare o dall'API di Claude reali:
   si usano server finti, come in `sazed-bot`.
-- Costi contenuti: Haiku per classificare e interpretare; modelli più costosi o servizi a
-  pagamento solo chiedendo. Il modello sta in `config.toml` (`[claude] model`), mai nel codice:
-  la chiave non è legata a un modello.
+- Costi contenuti: Haiku per interpretare e rispondere, Sonnet per le schede (decisione del 10
+  novembre 2026); altri modelli o servizi a pagamento solo chiedendo. I modelli stanno in
+  `config.toml` (`[claude] model` e `careful_model`), mai nel codice: la chiave non è legata a un
+  modello. Quando la risposta di uno non si può usare si chiede all'altro, e nel log va il motivo
+  (tipo d'errore e campo, o stop_reason), mai il contenuto.
 - I messaggi del bot sono brevi e chiari, con la voce pacata di un Custode, e seguono lo
   stile di `sazed-bot`: saluto per nome, poi il fatto ("Ciao <nome>, …").

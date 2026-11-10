@@ -27,10 +27,13 @@ data_dir = "data"
 api_base = "https://api.telegram.org"
 
 # Claude, through its API. The key is not tied to a model: the agent names the model on every
-# request. Haiku understands your messages, describes what it reads and answers your questions.
+# request. Haiku, quick, understands your messages and answers your questions; Sonnet, more
+# careful, writes the card of everything you keep (what it is, its title, topics and summary),
+# which stays. When one of them gives an answer that cannot be used, the agent asks the other.
 [claude]
 api_base = "https://api.anthropic.com"
 model = "claude-haiku-5-5"
+careful_model = "claude-sonnet-5-5"
 
 # Voice messages, audio and videos are transcribed on this computer, by whisper.cpp on the
 # processor, at low priority. scripts/setup-whisper.sh downloads the model into models/.

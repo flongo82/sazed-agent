@@ -50,8 +50,17 @@ if not re.search(r"^anthropic_api_key\s*=", text, flags=re.M):
     text = text[:m.end()] + '\nanthropic_api_key = "secrets/anthropic_api_key"' + text[m.end():]
     added.append("anthropic_api_key")
 if not re.search(r"^\[claude\]", text, flags=re.M):
-    text = text.rstrip("\n") + '\n\n[claude]\napi_base = "https://api.anthropic.com"\nmodel = "claude-haiku-5-5"\n'
+    text = (text.rstrip("\n") + '\n\n[claude]\napi_base = "https://api.anthropic.com"\nmodel = "claude-haiku-5-5"\n'
+            'careful_model = "claude-sonnet-5-5"\n')
     added.append("[claude]")
+else:
+    # A [claude] from before careful_model: it goes right after the line of model.
+    section = re.search(r"^\[claude\][^\[]*", text, flags=re.M | re.S)
+    if not re.search(r"^careful_model\s*=", section.group(0), flags=re.M):
+        line = re.search(r"^model\s*=.*$", section.group(0), flags=re.M)
+        at = section.start() + (line.end() if line else len(section.group(0).rstrip("\n")))
+        text = text[:at] + '\ncareful_model = "claude-sonnet-5-5"' + text[at:]
+        added.append("careful_model")
 if added:
     open(path, "w", encoding="utf-8").write(text)
     print("Added to config.toml: " + ", ".join(added) + ".")
@@ -64,26 +73,30 @@ EOF
 CHECK=$(cat <<'EOF'
 import json, os, sys, tomllib, urllib.error, urllib.parse, urllib.request
 claude = tomllib.load(open(sys.argv[1], "rb"))["claude"]
-model = claude["model"]
 base = os.environ.get("SAZED_CLAUDE_API_BASE") or claude["api_base"]  # the tests point it elsewhere
-url = base.rstrip("/") + "/v1/models/" + urllib.parse.quote(model)
-request = urllib.request.Request(url, headers={"x-api-key": sys.stdin.read(), "anthropic-version": "2023-06-01"})
-try:
-    with urllib.request.urlopen(request, timeout=20) as response:
-        name = json.load(response).get("display_name") or model
-    print(f"The API accepts the key, and the agent will use {name} ({model}).")
-except urllib.error.HTTPError as err:
-    if err.code in (401, 403):
-        print(f"The API refused the key ({err.code}): check that you pasted it whole and that it is active.", file=sys.stderr)
-        sys.exit(2)
-    if err.code == 404:
-        print(f"The key works, but the API does not know the model {model}: fix [claude] model in config.toml.", file=sys.stderr)
-        sys.exit(3)
-    print(f"The API answered {err.code}: the key could not be checked.", file=sys.stderr)
-    sys.exit(4)
-except (urllib.error.URLError, TimeoutError) as err:
-    print(f"The API could not be reached ({getattr(err, 'reason', err)}): the key could not be checked.", file=sys.stderr)
-    sys.exit(4)
+key = sys.stdin.read()
+uses = {"model": "to understand your messages and answer", "careful_model": "to write the cards of what you keep"}
+names = []
+for setting in dict.fromkeys(s for s in uses if s in claude):
+    model = claude[setting]
+    url = base.rstrip("/") + "/v1/models/" + urllib.parse.quote(model)
+    request = urllib.request.Request(url, headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            names.append(f"{json.load(response).get('display_name') or model} ({model}) {uses[setting]}")
+    except urllib.error.HTTPError as err:
+        if err.code in (401, 403):
+            print(f"The API refused the key ({err.code}): check that you pasted it whole and that it is active.", file=sys.stderr)
+            sys.exit(2)
+        if err.code == 404:
+            print(f"The key works, but the API does not know the model {model}: fix [claude] {setting} in config.toml.", file=sys.stderr)
+            sys.exit(3)
+        print(f"The API answered {err.code}: the key could not be checked.", file=sys.stderr)
+        sys.exit(4)
+    except (urllib.error.URLError, TimeoutError) as err:
+        print(f"The API could not be reached ({getattr(err, 'reason', err)}): the key could not be checked.", file=sys.stderr)
+        sys.exit(4)
+print("The API accepts the key, and the agent will use " + ", and ".join(names) + ".")
 EOF
 )
 status=0

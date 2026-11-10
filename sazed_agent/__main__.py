@@ -116,7 +116,8 @@ def claude_for(config):
     """Claude, se configurato; senza, l'agente custodisce lo stesso: le parole accompagnano i link
     o diventano una nota, nulla si descrive e alle domande non si risponde."""
     try:
-        return Claude(config.anthropic_api_key, config.claude.api_base, config.claude.model)
+        return Claude(config.anthropic_api_key, config.claude.api_base, config.claude.model,
+                      config.claude.careful_model)
     except ConfigError as err:
         log.warning("Claude non configurato, ogni testo diventa una nota: %s", err)
         return None

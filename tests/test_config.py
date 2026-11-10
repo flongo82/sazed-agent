@@ -101,9 +101,11 @@ class Config(unittest.TestCase):
     def test_claude_settings_and_key(self):
         self.secret("anthropic_api_key", " sk-ant-api03-prova\n")
         config = load(self.path)
-        self.assertEqual((config.claude.api_base, config.claude.model),
-                         ("https://api.anthropic.com", "claude-haiku-5-5"))
+        self.assertEqual((config.claude.api_base, config.claude.model, config.claude.careful_model),
+                         ("https://api.anthropic.com", "claude-haiku-5-5", "claude-sonnet-5-5"))
         self.assertEqual(config.anthropic_api_key, "sk-ant-api03-prova")
+        self.edit('careful_model = "claude-sonnet-5-5"\n', "")  # una configurazione di prima: un modello solo
+        self.assertEqual(load(self.path).claude.careful_model, "claude-haiku-5-5")
 
     def test_missing_claude_key_points_to_its_setup(self):
         with self.assertRaisesRegex(ConfigError, "anthropic_api_key non esiste: lancia scripts/setup-claude.sh"):
@@ -139,6 +141,7 @@ class Config(unittest.TestCase):
             ('unreadable = "🤷"', 'unreadable = 1', "reactions.unreadable"),
             ("pong_timeout = 10", "pong_timeout = 30", "minore di connection.ping_interval"),
             ('model = "claude-haiku-5-5"', 'model = ""', "claude.model"),
+            ('careful_model = "claude-sonnet-5-5"', 'careful_model = " "', "claude.careful_model"),
             ("threads = 8", "threads = 0", "whisper.threads"),
             ("threads = 8", "threads = true", "whisper.threads"),
             ('model = "models/ggml-large-v3-turbo-q5_0.bin"', "model = 3", "whisper.model"),

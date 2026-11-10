@@ -511,6 +511,46 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.items()[0].extraction != "pending")
         self.assertEqual((self.items()[0].extraction, lookup.asked), ("complete", []))
 
+    async def test_a_voice_note_naming_a_book_gets_its_card_from_the_catalogues(self):
+        self.telegram.file("v", b"OggS voce")
+        lookup = FakeLookup([{"source": "Open Library", "title": "The Nerd Reich", "authors": ["Gil Durán"],
+                              "year": 2026}])
+        p = self.with_claude(listener=FakeListener("Ricordami The Nerd Rike di Gil Duran."), lookup=lookup)
+        self.claude.on("interpret", lambda m: interpretation())
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "note", "The Nerd Reich, di Gil Durán" if "found_online" in m else "The Nerd Rike di Gil Duran",
+            works=[("The Nerd Rike", ["Gil Duran"], "book")]))
+        await self.handle(update(1, voice={"file_id": "v", "file_unique_id": "V", "duration": 3}), processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        self.assertEqual(self.items()[0].title, "The Nerd Reich, di Gil Durán")
+        self.assertEqual(lookup.asked, [("The Nerd Rike", ("Gil Duran",), "book", "it")])
+        self.assertEqual(self.claude.messages("describe")[1]["found_online"], lookup.found)
+
+    async def test_a_typed_note_naming_a_book_is_described_again_with_the_catalogues(self):
+        words = "da leggere: End Times Fascism di Naomi Klein"
+        lookup = FakeLookup([{"source": "Wikipedia (en)", "title": "End Times Fascism", "text": "An essay."}])
+        p = self.with_claude(lookup=lookup)
+        self.claude.on("interpret", lambda m: interpretation(note=m["current"]["words"], kind="note",
+                                                             title="Da leggere", names_works=True))
+        self.claude.on("describe", lambda m: fake_claude.description(
+            "note", "End Times Fascism, di Naomi Klein", ["libri da leggere"],
+            "Un saggio." if "found_online" in m else None, works=[("End Times Fascism", ["Naomi Klein"], "book")]))
+        await self.handle(update(1, words), processor=p)
+        await self.until(lambda: self.items()[0].extraction != "pending")
+        [item] = self.items()
+        self.assertEqual((item.extraction, item.title, item.summary, item.note, item.content),
+                         ("complete", "End Times Fascism, di Naomi Klein", "Un saggio.", words, None))
+        first = self.claude.messages("describe")[0]
+        self.assertEqual((first["source"], first["note"], first["content"]), ("note", None, words))
+        self.assertEqual((self.reactions(), self.replies()), (["👍"], []))
+
+    async def test_a_typed_note_naming_no_work_keeps_the_card_it_was_saved_with(self):
+        p = self.with_claude(lookup=FakeLookup())
+        self.claude.on("interpret", lambda m: interpretation(note=m["current"]["words"], title="Spesa"))
+        await self.handle(update(1, "comprare il latte"), processor=p)
+        [item] = self.items()
+        self.assertEqual((item.extraction, item.title, self.claude.messages("describe")), ("complete", "Spesa", []))
+
     async def test_a_document_is_read_in_full_when_asked_and_then_answered(self):
         p = self.with_claude(documents=Documents())
         self.claude.on("interpret", lambda m: interpretation(read_in_full=[m["current"]["items"][0]["id"]]))
@@ -580,7 +620,7 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         p = await self.start(self.processor(reads=True))
         self.assertEqual(p.readable, ("link",))
         self.assertEqual(self.with_claude(reads=True, listener=FakeListener()).readable,
-                         ("link", "photo", "voice", "audio", "video", "video_note"))
+                         ("link", "photo", "note", "voice", "audio", "video", "video_note"))
 
     async def test_an_unreadable_link_gets_a_shrug(self):
         self.web.route("https://example.com/via", 410)

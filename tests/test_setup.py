@@ -289,8 +289,10 @@ class FakeClaude(BaseHTTPRequestHandler):
         FakeClaude.seen.append((self.path, key, version))
         if key != KEY or not version:
             status, body = 401, {"type": "error", "error": {"type": "authentication_error"}}
-        elif self.path == "/v1/models/claude-haiku-5-5":
-            status, body = 200, {"type": "model", "id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5"}
+        elif self.path in ("/v1/models/claude-haiku-5-5", "/v1/models/claude-sonnet-5-5"):
+            model = self.path.rsplit("/", 1)[1]
+            status, body = 200, {"type": "model", "id": model,
+                                 "display_name": "Claude Haiku 5.5" if "haiku" in model else "Claude Sonnet 5.5"}
         else:
             status, body = 404, {"type": "error", "error": {"type": "not_found_error"}}
         self.send_response(status)
@@ -340,9 +342,13 @@ class SetupClaude(unittest.TestCase):
     def test_the_key_is_checked_with_the_api_then_saved(self):
         result = self.run_setup(f" \x1b[200~{KEY}\x1b[201~\r\n")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("the agent will use Claude Haiku 5.5 (claude-haiku-5-5)", result.stdout)
+        self.assertIn("the agent will use Claude Haiku 5.5 (claude-haiku-5-5) to understand your messages and answer,"
+                      " and Claude Sonnet 5.5 (claude-sonnet-5-5) to write the cards of what you keep", result.stdout)
         self.assertEqual((self.key.read_text(), stat.S_IMODE(self.key.stat().st_mode)), (KEY, 0o600))
-        self.assertEqual(FakeClaude.seen, [("/v1/models/claude-haiku-5-5", KEY, "2023-06-01")])
+        self.assertEqual(FakeClaude.seen, [("/v1/models/claude-haiku-5-5", KEY, "2023-06-01"),
+                                           ("/v1/models/claude-sonnet-5-5", KEY, "2023-06-01")])
+        self.assertEqual(tomllib.loads(self.config.read_text())["claude"]["careful_model"], "claude-sonnet-5-5")
+        self.assertIn('model = "claude-haiku-5-5"\ncareful_model = "claude-sonnet-5-5"\n', self.config.read_text())
         self.assertEqual(tomllib.loads(self.config.read_text())["secrets"]["anthropic_api_key"],
                          "secrets/anthropic_api_key")
 
@@ -377,7 +383,8 @@ class SetupClaude(unittest.TestCase):
         self.assertIn("could not be reached", result.stderr)
         self.assertIn("Run this script again later", result.stderr)
         config = tomllib.loads(self.config.read_text(encoding="utf-8"))
-        self.assertEqual(config["claude"], {"api_base": "https://api.anthropic.com", "model": "claude-haiku-5-5"})
+        self.assertEqual(config["claude"], {"api_base": "https://api.anthropic.com", "model": "claude-haiku-5-5",
+                                            "careful_model": "claude-sonnet-5-5"})
         self.assertEqual(config["secrets"]["anthropic_api_key"], "secrets/anthropic_api_key")
         self.assertEqual(config["storage"], {"data_dir": "data"})
         self.assertEqual(self.key.read_text(), KEY)

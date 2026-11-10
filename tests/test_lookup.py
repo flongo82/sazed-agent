@@ -1,11 +1,12 @@
 """Le schede delle opere pubblicate contro un finto web: Open Library per i libri, Crossref per gli
-articoli, Wikipedia per tutte, una fonte che non risponde, i titoli fuori dai log."""
+articoli, Wikipedia per tutte, una fonte che non risponde, i titoli fuori dai log; le voci che non
+sono dell'opera, i libri senza descrizione, titoli e autori sentiti male."""
 
 import json
 import unittest
 from urllib.parse import quote, urlencode
 
-from sazed_agent.lookup import Lookup
+from sazed_agent.lookup import Lookup, same_title
 from sazed_agent.reader import Reader
 from tests.fake_web import FakeWeb, allow_all
 
@@ -22,6 +23,12 @@ class LookupTest(unittest.IsolatedAsyncioTestCase):
     def json(self, url, data, status=200):
         self.web.route(url, status, json.dumps(data), {"content-type": "application/json"})
 
+    def books(self, docs, limit=1, **query):
+        """Ciò che risponde Open Library a una ricerca."""
+        query = {k: v for k, v in query.items() if v} | {"limit": limit,
+                                                           "fields": "key,title,author_name,first_publish_year"}
+        self.json(f"https://openlibrary.org/search.json?{urlencode(query)}", {"docs": docs})
+
     def wikipedia(self, lang, words, page=None, extract=None, kind="standard", before=()):
         """Ciò che risponde Wikipedia a una ricerca: la voce trovata (dopo quelle in before) e il suo
         riassunto, o nessuna voce."""
@@ -33,10 +40,8 @@ class LookupTest(unittest.IsolatedAsyncioTestCase):
                       {"type": kind, "title": page, "extract": extract})
 
     async def test_a_book_has_its_open_library_description_and_its_wikipedia_summary(self):
-        query = {"title": TITLE, "limit": 1, "fields": "key,title,author_name,first_publish_year", "author": AUTHOR}
-        self.json(f"https://openlibrary.org/search.json?{urlencode(query)}", {"docs": [
-            {"key": "/works/OL123W", "title": "The Well of Ascension", "author_name": [AUTHOR],
-             "first_publish_year": 2007}]})
+        self.books([{"key": "/works/OL123W", "title": "The Well of Ascension", "author_name": [AUTHOR],
+                     "first_publish_year": 2007}], title=TITLE, author=AUTHOR)
         self.json("https://openlibrary.org/works/OL123W.json", {"description": {"value": "Vin and Elend <b>rule</b>."}})
         self.wikipedia("it", TITLE, "Mistborn: Il pozzo dell'ascensione", "Romanzo fantasy del 2007.",
                        before=[AUTHOR])  # la voce dell'autore si salta
@@ -67,6 +72,52 @@ class LookupTest(unittest.IsolatedAsyncioTestCase):
                                   "text": "A 2006 fantasy novel."}])
         searched = [u for u in self.web.requests if "srsearch" in u]
         self.assertEqual(len(searched), 4)  # il solo titolo, poi titolo e autore, in italiano e in inglese
+
+    async def test_wikipedia_takes_only_a_page_about_the_work(self):
+        self.wikipedia("it", "The Nerd Reich", before=["Jon Heder", "Gil Duran"])  # un attore, l'autore
+        self.wikipedia("it", "The Nerd Reich Gil Duran", before=["Zachary Levi"])
+        self.wikipedia("en", "The Nerd Reich", "The Nerd Reich", "A 2026 non-fiction book by Gil Durán.",
+                       before=["Technolibertarianism"])
+        found = await self.lookup.find("The Nerd Reich", ["Gil Duran"], "other", "it")
+        self.assertEqual(found, [{"source": "Wikipedia (en)", "title": "The Nerd Reich",
+                                  "text": "A 2026 non-fiction book by Gil Durán."}])
+        self.assertFalse([u for u in self.web.requests if "summary/Jon" in u or "summary/Zachary" in u])
+
+    async def test_a_misheard_title_is_found_among_its_authors_books_and_then_on_wikipedia(self):
+        self.books([], title="The Nerd Rike", author="Gil Duran")
+        self.books([], limit=5, title="The Nerd Rike")
+        self.books([{"key": "/works/OL9W", "title": "Introducción a la investigación social", "author_name": ["Gil Durán Vidal"]},
+                    {"key": "/works/OL7W", "title": "The Nerd Reich", "author_name": ["Gil Durán"],
+                     "first_publish_year": 2026}], limit=20, author="Gil Duran")
+        self.json("https://openlibrary.org/works/OL7W.json", {"title": "The Nerd Reich"})  # senza descrizione
+        for words in ("The Nerd Rike", "The Nerd Rike Gil Duran"):
+            self.wikipedia("en", words)  # Wikipedia, con il titolo sentito male, non trova nulla
+        self.wikipedia("en", "The Nerd Reich", "The Nerd Reich", "A 2026 non-fiction book.")
+        found = await self.lookup.find("The Nerd Rike", ["Gil Duran"], "book", "en")
+        self.assertEqual(found, [
+            {"source": "Open Library", "title": "The Nerd Reich", "authors": ["Gil Durán"], "year": 2026},
+            {"source": "Wikipedia (en)", "title": "The Nerd Reich", "text": "A 2026 non-fiction book."}])
+
+    async def test_a_misheard_author_is_found_among_the_books_with_that_title(self):
+        self.books([], title="End Times Fascism", author="Rastra Taylor")
+        self.books([{"key": "/works/OL5W", "title": "End Times Fascism", "author_name": ["Naomi Klein", "Astra Taylor"],
+                     "first_publish_year": 2026}], limit=5, title="End Times Fascism")
+        self.json("https://openlibrary.org/works/OL5W.json", {})
+        self.wikipedia("en", "End Times Fascism", before=["Naomi Klein", "Astra Taylor"])  # nessuna voce sua
+        self.wikipedia("en", "End Times Fascism Rastra Taylor")
+        found = await self.lookup.find("End Times Fascism", ["Rastra Taylor"], "book", "en")
+        self.assertEqual(found, [{"source": "Open Library", "title": "End Times Fascism",
+                                  "authors": ["Naomi Klein", "Astra Taylor"], "year": 2026}])
+
+    def test_titles_are_the_same_work_only_when_they_really_are(self):
+        same = [("Il pozzo dell'ascensione", "Mistborn: Il pozzo dell'ascensione"), ("It", "It (novel)"),
+                ("Il nome della rosa", "IL NOME DELLA ROSA!"), ("Cent'anni di solitudine", "Cent’anni di solitudine"),
+                ("The Nerd Reich: Silicon Valley Fascism and the War on Democracy", "The Nerd Reich"),
+                ("Gödel, Escher, Bach", "Godel Escher Bach")]
+        different = [("Dune Messiah", "Dune"), ("It", "Italia"), ("End Times Fascism", "Astra Taylor"),
+                     ("The Nerd Rike", "The Nerd Reich"), ("", "Dune"), ("Dune", None)]
+        self.assertEqual([same_title(a, b) for a, b in same], [True] * len(same))
+        self.assertEqual([same_title(a, b) for a, b in different], [False] * len(different))
 
     async def test_a_source_that_fails_is_skipped_without_the_title_in_the_logs(self):
         query = {"title": TITLE, "limit": 1, "fields": "key,title,author_name,first_publish_year"}

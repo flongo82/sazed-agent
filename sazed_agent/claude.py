@@ -42,6 +42,8 @@ log = logging.getLogger("sazed_agent.claude")
 KINDS = ("recipe", "article", "book", "video", "note", "photo", "document", "other")
 TITLE_MAX, TOPICS_MAX, TOPIC_MAX, SUMMARY_MAX, WORDS_MAX = 120, 8, 40, 1000, 4000
 AUTHORS_MAX, AUTHOR_MAX = 10, 80
+WORKS_MAX = 3             # opere citate in una nota, da cercare nei cataloghi
+WORK_KINDS = ("book", "article", "other")
 IMAGE_TEXT_MAX = 8_000    # caratteri delle scritte lette nelle immagini
 CONTENT_MAX = 12_000      # caratteri del testo letto che Claude vede per descrivere
 WHOLE_MAX = 800_000       # di un documento letto tutto: un libro intero, circa 250 mila token
@@ -70,7 +72,9 @@ Return:
 - note: words to keep as a note of their own (a reminder, an idea, a list, a fact), copied \
 verbatim; null otherwise. With it, note_kind (recipe, article, book, video, note, photo, \
 document, other), note_title (at most 80 characters), note_topics (up to 8 short lowercase topics) and \
-note_summary (one sentence, or null) to find it again.
+note_summary (one sentence, or null) to find it again, and note_names_works: true when the note \
+names published works (books, essays, articles, films, albums) by their title, to look up in public \
+catalogues; false otherwise.
 - comment: words that say something about items (what they are, why they matter, what to do \
 with them), copied verbatim; null otherwise. comment_on: the ids of those items, from the \
 current message or, when the words follow up on an earlier message (a comment sent right after \
@@ -104,13 +108,18 @@ words, more so over busy pictures. For a voice \
 message, an audio or a video, content is an automatic transcript of its audio: it can have \
 mistakes, and over music or silence it can contain phrases nobody said (subtitle credits, \
 thanks for watching): ignore those. A voice message is the owner speaking to remember \
-something: it is a note.
+something: it is a note. A note (source note) is the owner's own typed words, in content. In a \
+transcript names are often misheard, above all titles and names in another language (an English \
+title said in an Italian sentence): when you clearly recognise the work, person or place that was \
+meant, write it correctly in title, topics and summary. Never invent: if you do not recognise it, \
+keep the words as they are.
 
 For a document (a file sent in the chat), unless partial is false only its file data and first \
 pages were read: what tells what it is, often with the abstract of a paper. found_online, when \
-there, holds descriptions found in free public catalogues (Open Library, Crossref, Wikipedia) \
-for a work with this title: use one for the summary only if it clearly speaks of this same work \
-(same title and author), never mix works.
+there, holds cards found in free public catalogues (Open Library, Crossref, Wikipedia) for a work \
+with this title, or for the works a note names: use a card only if it clearly speaks of the same \
+work (the same title, or the one a transcript misheard, and the same author), never mix works. A \
+card with no text still tells how the title and the authors' names are written, and the year.
 
 Return:
 - kind: recipe, article, book, video, note, photo, document or other. Prefer what it is about over \
@@ -130,6 +139,11 @@ notes, a form). False for anything else;
 that appear on a video), in reading order and in their own language, each repeated caption only \
 once: for a video, your clean reading of text_on_screen and of the frames together; null when \
 there are no words;
+- works: for a note (typed or spoken), the published works it names (books, essays, articles, \
+films, albums), at most 3: title and authors as they are best known (correct what a transcript \
+misheard when you recognise it), and kind: book, article or other. Empty for anything else. When a \
+note names a work, the summary says what kind of work it is and, if you know it or a card says it, \
+what it is about;
 - useful: false when nothing that was read says what the item is about: no meaningful words, \
 transcript, writing or recognisable subject (for a video, no caption, no speech, no writing and \
 nothing recognisable in the frames); true otherwise.
@@ -276,6 +290,14 @@ class Classification:
     published: bool = False    # un'opera pubblicata, non un documento personale
     image_text: str | None = None   # le scritte lette nelle immagini (foto, copertina, fotogrammi)
     useful: bool = True        # False: da ciò che si è letto non si capisce di che cosa parla
+    works: tuple = ()          # le opere che una nota nomina (Work), da cercare nei cataloghi
+
+
+@dataclass(frozen=True)
+class Work:
+    title: str
+    authors: tuple = ()
+    kind: str = "other"        # book, article o other: dice in quali cataloghi cercarla
 
 
 @dataclass(frozen=True)
@@ -290,6 +312,7 @@ class Interpretation:
     keep_spoken: bool = True            # False: il vocale portava solo una domanda o un commento
     read_in_full: tuple = ()            # i documenti da leggere tutti, come chiede l'utente
     read_in_full_named: str | None = None   # o il titolo di uno che non è fra quelli mostrati
+    look_up: bool = False               # la nota nomina opere: la sua scheda la scrive chi legge, con i cataloghi
 
     @classmethod
     def plain(cls, words, current):
@@ -307,11 +330,12 @@ class Interpretation:
         description = data.get("description")
         return cls(data.get("note"),
                    Classification(**dict(description, topics=tuple(description.get("topics") or ()),
-                                         authors=tuple(description.get("authors") or ())))
+                                         authors=tuple(description.get("authors") or ()), works=()))
                    if description else None,
                    data.get("comment"), tuple(data.get("comment_on") or ()), data.get("question"),
                    tuple(data.get("about") or ()), data.get("spoken"), data.get("keep_spoken", True),
-                   tuple(data.get("read_in_full") or ()), data.get("read_in_full_named"))
+                   tuple(data.get("read_in_full") or ()), data.get("read_in_full_named"),
+                   bool(data.get("look_up", False)))
 
 
 @dataclass(frozen=True)
@@ -333,6 +357,13 @@ class _Interpretation(BaseModel):
     read_in_full: list[int]
     read_in_full_named: str | None
     keep_spoken: bool
+    note_names_works: bool
+
+
+class _Work(BaseModel):
+    title: str
+    authors: list[str]
+    kind: Literal[WORK_KINDS]
 
 
 class _Description(BaseModel):
@@ -342,6 +373,7 @@ class _Description(BaseModel):
     summary: str | None
     image_text: str | None
     useful: bool
+    works: list[_Work]
 
 
 class _DocumentDescription(_Description):
@@ -350,8 +382,12 @@ class _DocumentDescription(_Description):
 
 
 class Claude:
-    def __init__(self, api_key, api_base, model, timeout=60.0, max_retries=2):
-        self.model = model
+    """model, veloce, capisce i messaggi e risponde; careful_model, più attento, scrive le schede di
+    ciò che si custodisce, che restano. Quando la risposta di uno non si può usare (fuori schema,
+    rifiutata, troncata), si chiede all'altro; il motivo va nel log, mai il contenuto."""
+
+    def __init__(self, api_key, api_base, model, careful_model=None, timeout=60.0, max_retries=2):
+        self.model, self.careful_model = model, careful_model or model
         self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=api_base, timeout=timeout,
                                                max_retries=max_retries)
 
@@ -369,7 +405,8 @@ class Claude:
                    "current": {"words": words, "items": [view(i) for i in items], "reply_to": reply_to}}
         if spoken:
             message["current"]["spoken"] = spoken
-        answer = await self._parse(INTERPRET, message, _Interpretation, "interpretazione")
+        answer = await self._parse(INTERPRET, message, _Interpretation, "interpretazione",
+                                   models=(self.model, self.careful_model))
         if answer is None:  # il vocale resta, come le parole: nulla si perde
             return replace(Interpretation.plain(words, current), spoken=spoken)
         return _interpretation(answer, words, current, known, spoken)
@@ -381,7 +418,8 @@ class Claude:
         message = {"language": language, "write_in": LANGUAGE_NAMES.get(language, language),
                    "source": item.source, "url": item.url,
                    "platform": platform_label(item.platform) or item.platform, "site": item.site,
-                   "note": item.note, "author": extract.author, "title": extract.title,
+                   "note": None if item.source == "note" else item.note,  # di una nota, è il contenuto
+                   "author": extract.author, "title": extract.title,
                    "partial": not extract.complete,
                    "content": (extract.text or "")[:WHOLE_MAX if whole else CONTENT_MAX],
                    "images": len(extract.images)}
@@ -391,12 +429,13 @@ class Claude:
             message["found_online"] = list(found)
         document = item.source == "document"
         answer = await self._parse(DESCRIBE, message, _DocumentDescription if document else _Description,
-                                   "descrizione", extract.images, WHOLE_TIMEOUT if whole else None)
+                                   "descrizione", extract.images, WHOLE_TIMEOUT if whole else None,
+                                   models=(self.careful_model, self.model))
         if answer is None:
             return None
         return _description(answer.kind, answer.title, answer.topics, answer.summary,
                             answer.authors if document else (), document and answer.published,
-                            answer.image_text, answer.useful)
+                            answer.image_text, answer.useful, [(w.title, w.authors, w.kind) for w in answer.works])
 
     async def answer(self, conversation, question, about, language, library, today, spoken=False, meanings=None):
         """La risposta a una domanda (spoken: fatta in un vocale), cercando in library
@@ -428,27 +467,32 @@ class Claude:
         log.warning("Claude non ha finito la risposta in %d giri", ANSWER_TURNS)
         return None
 
-    async def _parse(self, system, message, schema, what, images=(), timeout=None):
+    async def _parse(self, system, message, schema, what, images=(), timeout=None, models=None):
+        """La risposta di Claude nello schema, dal primo dei modelli che ne dà una utilizzabile, o
+        None. Un errore dell'API non passa al modello successivo: lo gestisce chi chiama."""
         content = json.dumps(message, ensure_ascii=False)
         if images:  # prima le immagini, poi il testo che le accompagna
             content = [*({"type": "image", "source": {"type": "base64", "media_type": kind,
                                                      "data": base64.b64encode(data).decode()}}
                          for kind, data in images), {"type": "text", "text": content}]
         client = self.client.with_options(timeout=timeout) if timeout else self.client
-        try:
-            response = await client.messages.parse(
-                model=self.model, max_tokens=4096, system=system, output_format=schema,
-                output_config={"effort": "low"}, messages=[{"role": "user", "content": content}])
-        except anthropic.APIError as err:
-            raise _error(err) from None
-        except ValueError as err:  # testo che non rispetta lo schema
-            log.warning("%s di Claude non utilizzabile (%s)", what, type(err).__name__)
-            return None
-        _usage(what, response)
-        if response.stop_reason != "end_turn" or response.parsed_output is None:
-            log.warning("%s di Claude finita con %s", what, response.stop_reason)
-            return None
-        return response.parsed_output
+        for model in dict.fromkeys(models or (self.model,)):
+            try:
+                response = await client.messages.parse(
+                    model=model, max_tokens=4096, system=system, output_format=schema,
+                    output_config={"effort": "low"}, messages=[{"role": "user", "content": content}])
+            except anthropic.APIError as err:
+                raise _error(err) from None
+            except ValueError as err:  # testo che non rispetta lo schema
+                log.warning("%s di %s non utilizzabile: %s", what, model, _invalid(err))
+                continue
+            _usage(what, response, model)
+            if response.stop_reason == "end_turn" and response.parsed_output is not None:
+                return response.parsed_output
+            category = getattr(getattr(response, "stop_details", None), "category", None)
+            log.warning("%s di %s finita con %s%s", what, model, response.stop_reason,
+                        f" ({category})" if category else "")
+        return None
 
     async def _create(self, **params):
         try:
@@ -510,19 +554,26 @@ def _interpretation(answer, words, current, known, spoken=None):
         description = None
     return Interpretation(note, description, comment, comment_on if comment else (), question,
                           about if question else (), spoken, keep_spoken, read_in_full if question else (),
-                          named if question else None)
+                          named if question else None, bool(note and answer.note_names_works))
 
 
-def _description(kind, title, topics, summary, authors=(), published=False, image_text=None, useful=True):
+def _description(kind, title, topics, summary, authors=(), published=False, image_text=None, useful=True,
+                 works=()):
     clean = []
     for topic in topics:
         topic = _text(topic, TOPIC_MAX)
         if topic and topic.lower() not in clean:
             clean.append(topic.lower())
     names = tuple(dict.fromkeys(n for n in (_text(a, AUTHOR_MAX) for a in authors) if n))[:AUTHORS_MAX]
+    named = []
+    for work_title, work_authors, work_kind in works:
+        work_title = _text(work_title, TITLE_MAX)
+        if work_title and len(named) < WORKS_MAX:
+            named.append(Work(work_title, tuple(n for n in (_text(a, AUTHOR_MAX) for a in work_authors) if n)[:5],
+                              work_kind if work_kind in WORK_KINDS else "other"))
     return Classification(kind if kind in KINDS else None, _text(title, TITLE_MAX),
                           tuple(clean[:TOPICS_MAX]), _text(summary, SUMMARY_MAX), names, bool(published),
-                          _text(image_text, IMAGE_TEXT_MAX), bool(useful))
+                          _text(image_text, IMAGE_TEXT_MAX), bool(useful), tuple(named))
 
 
 async def _tool_result(block, library, chosen, meanings=None):
@@ -583,9 +634,20 @@ def _day(value):
     return int(time.mktime(time.strptime(value, "%Y-%m-%d")))  # mezzanotte, ora locale
 
 
-def _usage(what, response):
+def _usage(what, response, model=None):
     usage = response.usage
-    log.info("Claude (%s): %s token in ingresso, %s in uscita", what, usage.input_tokens, usage.output_tokens)
+    log.info("Claude (%s%s): %s token in ingresso, %s in uscita", what, f", {model}" if model else "",
+             usage.input_tokens, usage.output_tokens)
+
+
+def _invalid(err):
+    """Perché una risposta non rispetta lo schema: il tipo d'errore e il campo, mai il testo."""
+    try:
+        first = err.errors(include_url=False, include_context=False, include_input=False)[0]
+        where = ".".join(str(part) for part in first.get("loc") or ()) or "risposta"
+        return f"{type(err).__name__}, {first.get('type')} in {where}"
+    except (AttributeError, IndexError, TypeError):
+        return type(err).__name__
 
 
 def _text(value, limit):

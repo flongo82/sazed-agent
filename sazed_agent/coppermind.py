@@ -165,6 +165,7 @@ class Draft:
     kind: str | None = None
     topics: tuple = ()
     summary: str | None = None
+    look_up: bool = False   # una nota che nomina opere: resta da leggere, e la sua scheda nasce con i cataloghi
 
     @property
     def described(self):
@@ -653,7 +654,7 @@ def _values(draft):
             "kind": draft.kind, "topics": json.dumps(list(draft.topics), ensure_ascii=False) if draft.topics else None,
             "summary": draft.summary,
             "media": json.dumps(draft.media, ensure_ascii=False) if draft.media else None,
-            "extraction": "complete" if draft.source == "note" else "pending"}
+            "extraction": "complete" if draft.source == "note" and not draft.look_up else "pending"}
 
 
 def _match(text, words):

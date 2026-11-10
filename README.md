@@ -50,8 +50,13 @@ spoken in a voice message count like typed ones, so a question asked aloud gets 
   document in full, with it or later, and the whole text is read and summarised.
 
 From what was read, Claude gives each item a kind, a title, its authors, topics and a short
-summary, and the words written in its images (a photo, a screenshot, the captions of a video),
-which coppermind indexes with the text. A source that cannot be read gets 🤷 on its message. When
+summary (Claude Sonnet, which writes better cards and knows more; Haiku understands messages and
+answers), and the words written in its images (a photo, a screenshot, the captions of a video),
+which coppermind indexes with the text. A name misheard in a transcript is written right when
+Claude recognises it. The works a note names (a book to read, a film to see), typed or spoken, are
+looked up in the free catalogues too, and the card is written again with what they say: the
+title and authors as they are spelled, the year, what the work is about. A source that cannot be
+read gets 🤷 on its message. When
 sazed cannot tell what something is about, and you wrote nothing with it, it says so and asks you
 for a few words: they are kept with it. A message set aside after its attempts, or a source that
 could not be read because of a passing problem, comes with a Retry button that starts it over.
@@ -113,8 +118,10 @@ such as "Get cookies.txt LOCALLY" does it), run `scripts/setup-instagram.sh` on 
 delete the file and do not log out of that session.
 
 An API key is not tied to a model: the agent names the model on every request, from the
-`[claude]` section of `config.toml` (Claude Haiku by default, which is plenty for
-understanding messages, describing what it reads and answering). The key comes from the Claude
+`[claude]` section of `config.toml`: `model` (Claude Haiku by default, quick, for understanding
+messages and answering) and `careful_model` (Claude Sonnet by default, for the cards of what you
+keep, which stay; about a cent each). When one gives an answer that cannot be used, the agent
+asks the other. The key comes from the Claude
 Console, which bills separately from a claude.ai subscription. Create a key used only by this
 agent, so that you can revoke it on its own.
 
@@ -138,7 +145,7 @@ stop it here first, then copy this folder with its `data/` and `secrets/`.
 |---|---|
 | Connection | WebSocket client towards `sazed-bot`: backlog on start, periodic `ping`, `ack` once a message is safely in the local journal; reconnects by itself after a dropped connection or a sleep |
 | Reliability | Every message goes through persistent states (received, read, saved, answered, done, or failed), and every item through its own reading state, with limited retries; one broken item never blocks the others, and questions never wait behind a long reading |
-| Agent | The code saves, the model interprets: Claude says what your words are for and describes what was read, as structured data that the code checks and writes; to answer, it has read-only tools on coppermind and the recent conversation |
+| Agent | The code saves, the model interprets: Claude says what your words are for and describes what was read, as structured data that the code checks and writes; to answer, it has read-only tools on coppermind and the recent conversation. Haiku interprets and answers, Sonnet writes the cards; each stands in for the other when an answer cannot be used |
 | Links | Short links followed; pages read with Python's HTML parser; public previews (oEmbed) for Instagram, TikTok and YouTube; yt-dlp for YouTube; only public hosts, at most 5 MB, never an address inside your home network |
 | Audio and video | ffmpeg for the audio and a few frames, whisper.cpp on the processor at low priority, the first half hour at most |
 | Documents | poppler for PDFs (the first page as an image, for scans); EPUB, DOCX and ODT with Python's standard library, with limits against archives that unroll beyond measure |
@@ -149,8 +156,8 @@ stop it here first, then copy this folder with its `data/` and `secrets/`.
 Only links, metadata and extracted text are kept: the sources stay where they are, and your
 files stay in the Telegram chat. Downloaded files live in a temporary folder that disappears
 right after they are read. What goes to the Claude API is the text of your messages and what
-was read; titles of published works go to the free catalogues; nothing else leaves your
-computer.
+was read; titles and authors of published works (of your documents, or named in your notes) go
+to the free catalogues; nothing else leaves your computer.
 
 ## Make it yours
 
