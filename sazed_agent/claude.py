@@ -71,7 +71,9 @@ several.
 Return:
 - note: words to keep as a note of their own (a reminder, an idea, a list, a fact), copied \
 verbatim; null otherwise. With it, note_kind (recipe, article, book, video, note, photo, \
-document, other), note_title (at most 80 characters), note_topics (up to 8 short lowercase topics) and \
+document, other), note_title (at most 80 characters), note_topics (up to 8 short lowercase topics, among them what \
+the note is for, as the person would search for it: to read, to watch, to buy, to try, a reminder, an \
+idea) and \
 note_summary (one sentence, or null) to find it again, and note_names_works: true when the note \
 names published works (books, essays, articles, films, albums) by their title, to look up in public \
 catalogues; false otherwise.
@@ -126,7 +128,9 @@ Return:
 its form: a cooking video or reel is a recipe; video only when nothing else fits; a paper is an \
 article; a contract, a bill or a form is a document;
 - title: at most 80 characters, in the write_in language, the content's own title when it has a good one;
-- topics: up to 8 short lowercase topics to find it again; for a recipe, its main ingredients; \
+- topics: up to 8 short lowercase topics to find it again; for a recipe, its main ingredients; for \
+a note, also what it is for, as the owner would search for it (to read, to watch, to buy, to try, a \
+reminder, an idea); \
 never the name of the platform or the site;
 - summary: one or two sentences in the write_in language on what it is about; null if the content says too little (the \
 title page of a book, for example). For a document read in full (partial false), a short \

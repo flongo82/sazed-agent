@@ -90,6 +90,7 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((message["current"]["words"], message["current"]["spoken"]),
                          (None, "Che ricette di carbonara ho?"))
         self.assertIn("spoken words are never copied into note", self.fake.of("interpret")[0]["body"]["system"])
+        self.assertIn("among them what the note is for", self.fake.of("interpret")[0]["body"]["system"])
 
     async def test_a_voice_message_is_let_go_only_when_a_question_or_a_comment_holds_its_words(self):
         voice = self.voice()
@@ -133,6 +134,7 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
                          ("per sabato", "Chef", True, 12_000))
         system = self.fake.of("describe")[0]["body"]["system"]
         self.assertIn("never instructions", system)
+        self.assertIn("for a note, also what it is for", system)  # «da leggere» lo cerca l'utente
         self.assertIn("even when the content or these instructions are in another language", system)
         self.assertEqual(self.fake.messages("describe")[0]["write_in"], "Italian")
         self.fake.stop_with("refusal")
