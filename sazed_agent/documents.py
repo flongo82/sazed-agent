@@ -13,6 +13,7 @@ può promettere poco e srotolarsi in gigabyte. Tutto avviene sul file già scari
 cartella temporanea che sparisce subito dopo. Il testo letto è un dato, mai istruzioni.
 """
 
+import asyncio
 import posixpath
 import re
 import tempfile
@@ -50,8 +51,10 @@ class Documents:
             raise ReadError(f"formato di documento che non so leggere ({mime or 'tipo sconosciuto'})", permanent=True)
         if kind == "pdf":
             return await self._pdf(Path(path), full)
-        title, authors, description, text = {"epub": _epub, "docx": _docx, "odt": _odt, "text": _text_file}[kind](
-            Path(path), FULL_CHARS if full else GLANCE_CHARS)
+        # archivi e XML si leggono in un altro thread: un libro grosso non ferma comandi e collegamento
+        title, authors, description, text = await asyncio.to_thread(
+            {"epub": _epub, "docx": _docx, "odt": _odt, "text": _text_file}[kind], Path(path),
+            FULL_CHARS if full else GLANCE_CHARS)
         return _extract(title, authors, description, text, FULL_CHARS if full else GLANCE_CHARS)
 
     async def _pdf(self, path, full):
@@ -63,7 +66,8 @@ class Documents:
         title, authors = _meta_title(info.get("Title")), _meta(info.get("Author"))
         last = [] if full else ["-f", "1", "-l", str(GLANCE_PAGES)]
         out = await run_program([self.pdftotext, "-enc", "UTF-8", *last, str(path), "-"],
-                                60 + (pages or 0) // 2 if full else 60, "testo del PDF non estratto", permanent=True)
+                                60 + (pages or 0) // 2 if full else 60, "testo del PDF non estratto", permanent=True,
+                                limit=4 * (FULL_CHARS if full else GLANCE_CHARS) + 4)  # oltre, non servirebbe
         text = _tidy(out.decode("utf-8", "replace"))
         if full:
             if not text:

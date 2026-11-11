@@ -33,6 +33,8 @@ OCR_SURE = 85           # una lettera sola ("e", "a", "è") si tiene solo se tes
 OCR_PARALLEL = 4        # letture di tesseract insieme, un processore ciascuna
 SAME_CAPTION = 0.6      # quanta parte della lettura più corta, in comune, fa di due fotogrammi la stessa scritta
 SCREEN_TEXT_MAX = 8_000
+OUTPUT_MAX = 16_000_000  # byte che si raccolgono dall'uscita di un programma: oltre, lo si ferma
+ERRORS_MAX = 64_000      # dei suoi errori si tiene solo la fine
 # Due versioni di ogni fotogramma per tesseract: il grigio, per le scritte nette (su una fascia,
 # su uno sfondo calmo), e solo il chiaro vicino a un bordo scuro, ingrandito, per le scritte
 # bianche bordate di nero sopra il video, le più comuni nei reel.
@@ -189,10 +191,12 @@ def _chosen(segments, count):
     return sorted(chosen)
 
 
-async def run_program(command, timeout, failure, permanent=False, nice=False, env=None):
+async def run_program(command, timeout, failure, permanent=False, nice=False, env=None, limit=OUTPUT_MAX):
     """Esegue un programma e ne restituisce l'uscita; ReadError se fallisce o non finisce in tempo.
     Con nice, a priorità bassa; env aggiunge variabili d'ambiente a PATH, l'unica che passa. Se
-    l'attesa viene interrotta (l'agente si ferma), il programma si ferma con lei."""
+    l'attesa viene interrotta (l'agente si ferma), il programma si ferma con lei. Dell'uscita si
+    raccolgono al più limit byte, mentre arriva: raggiunti, il programma si ferma e restano quelli
+    (chi lo chiama sa che cosa farne di un testo tagliato)."""
     try:
         process = await asyncio.create_subprocess_exec(
             *command, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
@@ -202,15 +206,49 @@ async def run_program(command, timeout, failure, permanent=False, nice=False, en
     if nice:  # subito, prima che il programma avvii i suoi thread, che ereditano la priorità
         with contextlib.suppress(OSError):
             os.setpriority(os.PRIO_PROCESS, process.pid, NICE)
+
+    async def collect():
+        errors = asyncio.ensure_future(_tail(process.stderr, ERRORS_MAX))
+        try:
+            out, cut = await _head(process.stdout, limit)
+            if cut:
+                process.kill()  # basta così: e gli errori finiscono con lui
+            err = await errors
+        finally:
+            errors.cancel()
+        await process.wait()
+        return out, cut, err
+
     try:
-        out, err = await asyncio.wait_for(process.communicate(), timeout)
+        out, cut, err = await asyncio.wait_for(collect(), timeout)
     except asyncio.TimeoutError:
         raise ReadError(f"{failure}: tempo scaduto") from None
     finally:
         if process.returncode is None:
             process.kill()
             await process.wait()
+    if cut:
+        return out
     if process.returncode != 0:
         last = (err.decode(errors="replace").strip().splitlines() or ["nessun messaggio"])[-1][:200]
         raise ReadError(f"{failure}: {last}", permanent=permanent)
     return out
+
+
+async def _head(stream, limit):
+    """I primi limit byte di un flusso, mentre arrivano, e se ce n'erano di più."""
+    data = bytearray()
+    while chunk := await stream.read(65536):
+        if len(data) + len(chunk) > limit:
+            data += chunk[:limit - len(data)]
+            return bytes(data), True
+        data += chunk
+    return bytes(data), False
+
+
+async def _tail(stream, limit):
+    """Gli ultimi limit byte di un flusso, letto tutto (così il programma non si blocca a scriverlo)."""
+    data = bytearray()
+    while chunk := await stream.read(65536):
+        data = (data + chunk)[-limit:]
+    return bytes(data)

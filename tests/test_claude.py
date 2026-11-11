@@ -123,7 +123,7 @@ class ClaudeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.interpret("x"), Interpretation(comment="x", comment_on=(self.link.id, self.photo.id)))
 
     async def test_describing_uses_the_content_as_data(self):
-        self.memory.annotate(self.link.id, "per sabato")
+        self.memory.comment(42, 99, 1, "per sabato", [self.link.id])
         item = self.memory.get(self.link.id)
         self.fake.on("describe", lambda m: description("recipe", "Carbonara", ["Guanciale", "youtube"], "Pasta."))
         extract = Extract("Carbonara perfetta", "Chef", "guanciale " * 3000, False)

@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sazed_agent.coppermind import Coppermind, CoppermindError, Draft, Link, parse_link
+from sazed_agent.coppermind import (COLUMNS_5, SCHEMA, Coppermind, CoppermindError, Draft, Link, _statements,
+                                    parse_link)
 from sazed_agent.journal import Journal, JournalError
 from tests.fake_meanings import vector
 
@@ -144,14 +145,74 @@ class Saving(Base):
         item = self.memory.get(out.item.id)
         self.assertEqual((item.kind, item.title, item.topics, item.summary), (None, None, [], None))
 
-    def test_a_comment_sent_later_joins_the_note(self):
+    def test_a_comment_sent_later_joins_the_note_and_belongs_to_its_message(self):
         [out] = self.save(10, Draft("link", url="https://example.com/r"))
         for _ in range(2):  # una volta sola, anche se ripetuto
-            self.assertTrue(self.memory.annotate(out.item.id, "da fare sabato"))
-        self.memory.annotate(out.item.id, "con le pere")
+            self.assertEqual(self.memory.comment(42, 11, 1, "da fare sabato", [out.item.id]), [out.item.id])
+        self.memory.comment(42, 12, 2, "con le pere", [out.item.id])
         self.assertEqual(self.memory.get(out.item.id).note, "da fare sabato\ncon le pere")
         self.assertEqual(self.memory.search("pere").total, 1)
-        self.assertFalse(self.memory.annotate(999, "nessuno"))
+        self.memory.comment(42, 11, 1, "da fare domenica", [out.item.id])  # il messaggio 11, modificato
+        self.assertEqual(self.memory.get(out.item.id).note, "da fare domenica\ncon le pere")
+        self.memory.comment(42, 12, 2, None, [])  # il 12 non ne parla più
+        self.assertEqual(self.memory.get(out.item.id).note, "da fare domenica")
+        self.assertEqual(self.memory.comment(42, 13, 3, "nessuno", [999]), [])
+
+    def test_editing_a_message_keeps_the_words_of_the_others(self):
+        [out] = self.save(10, Draft("link", url="https://example.com/c", note="originale"))
+        self.memory.comment(42, 11, 1, "commento successivo", [out.item.id])
+        self.save(10, Draft("link", url="https://example.com/c", note="originale corretto"))
+        self.assertEqual(self.memory.get(out.item.id).note, "originale corretto\ncommento successivo")
+
+    def test_a_link_in_two_messages_stays_while_one_still_brings_it(self):
+        [first] = self.save(10, Draft("link", url="https://example.com/stesso"), sent_at=100)
+        [second] = self.save(20, Draft("link", url="https://example.com/stesso", note="anche qui"), sent_at=200)
+        self.assertEqual((first.item.id, first.status, second.status), (second.item.id, "saved", "already"))
+        self.save(10)  # il primo messaggio, modificato, non lo porta più: passa al secondo
+        item = self.memory.get(first.item.id)
+        self.assertEqual((item.message_id, item.sent_at, item.note), (20, 200, "anche qui"))
+        self.assertEqual([i.id for i in self.memory.of_message(42, 20)], [item.id])
+        self.save(20)  # ora non lo porta nessuno
+        self.assertIsNone(self.memory.get(item.id))
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM mentions").fetchone()[0], 0)
+
+    def test_numbers_are_never_reused_and_a_late_reading_does_not_land_elsewhere(self):
+        [a] = [o.item for o in self.save(10, Draft("link", url="https://example.com/a"))]
+        self.save(10)  # una modifica toglie il link A, mentre lo si legge
+        [b] = [o.item for o in self.save(20, Draft("link", url="https://example.com/b"))]
+        self.assertNotEqual(a.id, b.id)
+        self.assertFalse(self.memory.read_done(a.id, "complete", content="contenuto di A", reading=a.reading))
+        self.assertIsNone(self.memory.read_failed(a.id, "rotto", (1,), reading=a.reading))
+        self.assertIsNone(self.memory.get(b.id).content)
+
+    def test_a_reading_overtaken_by_a_full_reading_request_is_not_written(self):
+        media = {"file_id": "f", "file_unique_id": "F", "file_name": "libro.pdf", "mime_type": "application/pdf"}
+        self.save(10, Draft("document", media=media))
+        picked = self.memory.to_read(["document"])
+        self.assertTrue(self.memory.read_in_full(picked.id))  # chiesto mentre Claude descrive
+        self.assertFalse(self.memory.read_done(picked.id, "partial", content="prime pagine", reading=picked.reading))
+        again = self.memory.to_read(["document"])
+        self.assertEqual((again.id, again.read_full, again.reading), (picked.id, True, picked.reading + 1))
+        self.assertTrue(self.memory.read_done(again.id, "complete", content="tutto", reading=again.reading))
+
+    def test_a_first_save_that_does_not_know_the_note_leaves_it(self):
+        [note, link] = [o.item for o in self.save(10, Draft("note", note="da leggere"),
+                                                   Draft("link", url="https://example.com/l"))]
+        self.memory.comment(42, 11, 1, "bellissimo", [note.id])
+        self.memory.save(42, 10, day(2026, 11, 1), [Draft("link", url="https://example.com/l")], notes=False)
+        self.assertEqual(self.memory.get(note.id).note, "da leggere\nbellissimo")  # la nota resta, con il commento
+        self.save(10, Draft("link", url="https://example.com/l"))  # dopo l'interpretazione: niente più nota
+        self.assertIsNone(self.memory.get(note.id))
+
+    def test_a_note_to_look_up_is_read_again_when_its_words_change(self):
+        [note] = [o.item for o in self.save(10, Draft("note", note="Dune", look_up=True))]
+        self.assertEqual((note.extraction, note.reading), ("pending", 0))
+        self.save(10, Draft("note", note="Dune", look_up=True))  # le stesse parole: nulla cambia
+        self.assertEqual(self.memory.get(note.id).reading, 0)
+        self.save(10, Draft("note", note="Dune Messiah", look_up=True))
+        self.assertEqual((self.memory.get(note.id).extraction, self.memory.get(note.id).reading), ("pending", 1))
+        self.save(10, Draft("note", note="comprare il latte"))  # non nomina più opere: nulla da leggere
+        self.assertEqual((self.memory.get(note.id).extraction, self.memory.get(note.id).reading), ("complete", 2))
 
     def test_an_edit_that_changes_the_link_replaces_the_item(self):
         [old] = self.save(10, Draft("link", url="https://example.com/vecchio"))
@@ -277,8 +338,26 @@ class Reading(Base):
             self.memory.read_done(out.item.id, "pending")
 
 
+def as_version_5(db):
+    """Riporta il catalogo com'era alla versione 5: numeri che si possono riusare, senza numero di
+    lettura né mentions (le parole stanno solo nella nota)."""
+    db.execute("DROP TRIGGER mentions_delete")
+    db.execute("DROP TABLE mentions")
+    db.execute("ALTER TABLE items DROP COLUMN reading")
+    sql = db.execute("SELECT sql FROM sqlite_master WHERE name = 'items'").fetchone()[0]
+    db.execute(sql.replace("CREATE TABLE items", "CREATE TABLE items_v5", 1).replace(" AUTOINCREMENT", ""))
+    db.execute(f"INSERT INTO items_v5 ({COLUMNS_5}) SELECT {COLUMNS_5} FROM items")
+    db.execute("DROP TABLE items")
+    db.execute("ALTER TABLE items_v5 RENAME TO items")
+    for statement in _statements(SCHEMA):  # indici e trigger di allora
+        if "mentions" not in statement:
+            db.execute(statement)
+    db.execute("PRAGMA user_version = 5")
+
+
 def as_version_4(db):
     """Riporta il catalogo com'era alla versione 4: senza le letture da riprovare."""
+    as_version_5(db)
     db.execute("ALTER TABLE items DROP COLUMN retryable")
     db.execute("PRAGMA user_version = 4")
 
@@ -328,7 +407,7 @@ class Versions(unittest.TestCase):
         journal.record(7, update(1), "acquisition")
         self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 0)
         Coppermind(journal.db)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(journal.get(1).state, "received")
         Coppermind(journal.db)  # una seconda apertura non cambia nulla
 
@@ -344,7 +423,7 @@ class Versions(unittest.TestCase):
             db.execute(f"ALTER TABLE items DROP COLUMN {column}")
         db.execute("PRAGMA user_version = 1")
         memory = Coppermind(db, clock=lambda: 100.0)
-        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 6)
         item = memory.to_read(["link"])
         self.assertEqual((item.note, item.extraction, item.read_error), ("vecchio", "pending", None))
 
@@ -356,7 +435,7 @@ class Versions(unittest.TestCase):
         memory.read_done(old.id, "partial", title="Il pozzo dell'ascensione")
         as_version_2(journal.db)
         memory = Coppermind(journal.db, clock=lambda: 100.0)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(memory.search("pozzo").total, 1)  # l'indice ricostruito trova ciò che c'era
         memory.read_done(old.id, "partial", authors=["Brandon Sanderson"])
         self.assertEqual([i.id for i in memory.search("sanderson").items], [old.id])
@@ -369,7 +448,7 @@ class Versions(unittest.TestCase):
         [note] = [o.item for o in memory.save(42, 10, 1, [Draft("note", note="riso")])]
         as_version_3(journal.db)
         memory = Coppermind(journal.db, clock=lambda: 100.0)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual([i.id for i in memory.to_mean("modello")], [note.id])
 
     def test_a_catalogue_of_version_4_learns_which_readings_to_retry(self):
@@ -380,8 +459,25 @@ class Versions(unittest.TestCase):
         memory.read_failed(link.id, "HTTP 503", (), final="failed")
         as_version_4(journal.db)
         memory = Coppermind(journal.db, clock=lambda: 100.0)
-        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(memory.readings(42), {"retry": 0, "lost": 1})  # di prima: non si sa, non si riprova
+
+    def test_a_catalogue_of_version_5_learns_mentions_and_never_reuses_numbers(self):
+        journal = Journal(self.dir / "coppermind.db")
+        self.addCleanup(journal.close)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        [a] = [o.item for o in memory.save(42, 10, 1, [Draft("link", url="https://example.com/a", note="da provare")])]
+        [b] = [o.item for o in memory.save(42, 11, 2, [Draft("link", url="https://example.com/b")])]
+        as_version_5(journal.db)
+        memory = Coppermind(journal.db, clock=lambda: 100.0)
+        self.assertEqual(journal.db.execute("PRAGMA user_version").fetchone()[0], 6)
+        self.assertEqual((memory.get(a.id).note, memory.get(b.id).reading), ("da provare", 0))
+        memory.save(42, 11, 2, [])  # B sparisce
+        [c] = [o.item for o in memory.save(42, 12, 3, [Draft("link", url="https://example.com/c")])]
+        self.assertGreater(c.id, b.id)  # il suo numero non torna
+        memory.save(42, 10, 1, [Draft("link", url="https://example.com/a", note="da provare sabato")])
+        self.assertEqual(memory.get(a.id).note, "da provare sabato")  # la modifica sostituisce, non accumula
+        self.assertEqual(memory.search("provare").total, 1)
 
     def test_a_database_from_a_newer_version_is_refused(self):
         journal = Journal(self.dir / "coppermind.db")
@@ -435,7 +531,7 @@ class Meanings(Base):
         self.assertEqual(self.memory.to_mean("m"), [])
         self.assertEqual(len(self.memory.to_mean("altro-modello")), 2)  # un altro modello ricomincia
         self.now += 10
-        self.memory.annotate(link.id, "per domenica")
+        self.memory.comment(42, 99, 1, "per domenica", [link.id])
         self.assertEqual([i.id for i in self.memory.to_mean("m")], [link.id])
         self.memory.set_meaning(999, "m", vector("niente"), 0)  # un elemento che non c'è: nulla
         self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM meanings").fetchone()[0], 2)

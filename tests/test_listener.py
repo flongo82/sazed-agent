@@ -158,5 +158,17 @@ class CaptionsTest(unittest.TestCase):
         self.assertEqual(listener._confident("\n".join(rows)), ["Monta", "3", "E"])  # "i" non abbastanza sicura
 
 
+
+class RunProgramTest(unittest.IsolatedAsyncioTestCase):
+    async def test_the_output_is_collected_only_up_to_its_limit(self):
+        self.assertEqual(await listener.run_program(["echo", "ciao"], 5, "prova"), b"ciao\n")
+        out = await listener.run_program(["yes", "sazed"], 5, "prova", limit=1000)  # non finirebbe mai
+        self.assertEqual((len(out), out[:6]), (1000, b"sazed\n"))
+
+    async def test_a_flood_of_errors_does_not_block_and_only_its_end_is_kept(self):
+        script = "head -c 300000 /dev/zero | tr '\\0' x >&2; echo >&2; echo fatto; echo ultimo errore >&2; exit 3"
+        with self.assertRaisesRegex(ReadError, "^prova: ultimo errore$"):
+            await listener.run_program(["sh", "-c", script], 10, "prova")
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,10 +13,10 @@ from unittest import mock
 from sazed_agent import intake, lanes
 from sazed_agent.claude import Claude, Interpretation
 from sazed_agent.config import Reactions
-from sazed_agent.coppermind import Coppermind, Draft
+from sazed_agent.coppermind import Coppermind, Draft, connect
 from sazed_agent.documents import Documents
 from sazed_agent.journal import Journal
-from sazed_agent.lanes import Processor, lane_for
+from sazed_agent.lanes import Processor, _parts, lane_for
 from sazed_agent.meaning import MeaningError
 from sazed_agent.reader import Extract, Reader, ReadError
 from sazed_agent.telegram import Telegram, TelegramError
@@ -358,6 +358,35 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
                          (None, "Comprare il riso e il parmigiano."))
         self.assertEqual((self.reactions(), self.replies()), (["👍"], []))
 
+    async def test_a_long_answer_goes_in_several_messages_and_resumes_where_it_stopped(self):
+        p = self.with_claude()
+        self.claude.on("interpret", lambda m: interpretation(question=m["current"]["words"]))
+        long = "\n\n".join(f"Ricetta {n}: " + "zucchine " * 60 for n in range(20))  # oltre 11 mila caratteri
+        self.claude.on("answer", lambda messages: long)
+        sent = []
+
+        def second_fails_once(method, params):
+            if method == "sendMessage":
+                sent.append(params["text"])
+                return 500 if len(sent) == 2 else None
+        self.telegram.rule(second_fails_once)
+        await self.handle(update(1, "che ricette con le zucchine ho?"), processor=p)
+        await self.until(lambda: self.state(1) == "done")
+        calls = [prm for _, prm in self.telegram.ok_calls("sendMessage")]
+        self.assertEqual(len(calls), 3)  # nessun doppione: la seconda riparte, la prima no
+        self.assertEqual(" ".join(c["text"] for c in calls).split(), f"Ciao Ada, {long}".split())
+        self.assertTrue(all(len(c["text"]) <= 4000 for c in calls))
+        self.assertTrue(all(c["text"].startswith("Ricetta") for c in calls[1:]))  # tagliata fra due ricette
+        self.assertEqual(["reply_parameters" in c for c in calls], [True, False, False])
+        self.assertEqual(self.journal.get(1).reply_parts, 3)
+
+    def test_a_text_is_cut_where_it_reads_well(self):
+        self.assertEqual(_parts("breve"), ["breve"])
+        self.assertEqual(_parts("uno due tre quattro", limit=9), ["uno due", "tre", "quattro"])
+        self.assertEqual(_parts("riga uno\nriga due", limit=12), ["riga uno", "riga due"])
+        self.assertEqual(_parts("x" * 25, limit=10), ["x" * 10, "x" * 10, "x" * 5])  # nessun altro modo
+        self.assertEqual(_parts("🍰" * 6, limit=4), ["🍰🍰", "🍰🍰", "🍰🍰"])  # contati come Telegram: due l'uno
+
     async def test_a_question_asked_in_a_voice_message_is_answered_and_not_kept(self):
         self.telegram.file("v", b"OggS domanda")
         p = self.with_claude(listener=FakeListener("Che ricette di carbonara ho?"))
@@ -556,6 +585,25 @@ class LanesTest(unittest.IsolatedAsyncioTestCase):
         await self.handle(update(1, "comprare il latte"), processor=p)
         [item] = self.items()
         self.assertEqual((item.extraction, item.title, self.claude.messages("describe")), ("complete", "Spesa", []))
+
+    async def test_a_full_reading_asked_while_the_first_pages_are_described_is_not_lost(self):
+        p = self.with_claude(documents=Documents())
+        asked = []
+
+        def describe(m):
+            if not asked:  # l'utente chiede di leggerlo tutto proprio mentre Claude descrive le prime pagine
+                other = connect(self.dir / "coppermind.db")
+                [item_id] = other.execute("SELECT id FROM items WHERE source = 'document'").fetchone()
+                asked.append(Coppermind(other).read_in_full(item_id))
+                other.close()
+            return fake_claude.description("book", "Mistborn", published=True,
+                                           summary="Prime pagine." if m["partial"] else "Tutto il libro.")
+        self.claude.on("describe", describe)
+        await self.handle(self.document(1, pdf(["Mistborn", "Prologo", "Capitolo tre"])), processor=p)
+        await self.until(lambda: self.items()[0].extraction == "complete")
+        [item] = self.items()
+        self.assertEqual((asked, item.read_full, item.summary), ([True], True, "Tutto il libro."))
+        self.assertEqual([m["partial"] for m in self.claude.messages("describe")], [True, False])
 
     async def test_a_document_is_read_in_full_when_asked_and_then_answered(self):
         p = self.with_claude(documents=Documents())

@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS inbox (
   links            TEXT,
   reply_text       TEXT,
   send_back        TEXT,
-  unknown          TEXT
+  unknown          TEXT,
+  reply_parts      INTEGER NOT NULL DEFAULT 1   -- una risposta lunga va in più messaggi: quanti ne sono partiti
 );
 CREATE INDEX IF NOT EXISTS inbox_due ON inbox (lane, state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS inbox_chat ON inbox (chat_id, received_at);
@@ -55,7 +56,8 @@ LATEST = ("i.lane = 'acquisition' AND i.chat_id = ? AND i.message_id IS NOT NULL
           " ORDER BY received_at DESC, update_id DESC LIMIT 1)")
 
 # Colonne aggiunte dopo la prima versione: i registri di prima le ricevono all'avvio.
-ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT", "send_back": "TEXT", "unknown": "TEXT"}
+ADDED = {"interpretation": "TEXT", "links": "TEXT", "reply_text": "TEXT", "send_back": "TEXT", "unknown": "TEXT",
+         "reply_parts": "INTEGER NOT NULL DEFAULT 1"}
 
 
 class JournalError(Exception):
@@ -81,6 +83,7 @@ class Entry:
     reply_text: str | None = None
     send_back: tuple = ()            # gli elementi di cui la risposta rimanda il messaggio originale
     unknown: dict | None = None      # elementi letti senza capirne nulla, prima che le parole fossero salvate
+    reply_parts: int = 1             # i messaggi della risposta già partiti, se è lunga
 
 
 class Journal:
@@ -176,6 +179,12 @@ class Journal:
                 " last_error = NULL, updated_at = ? WHERE update_id = ?",
                 (state, reply_message_id, self.clock(), update_id),
             )
+
+    def set_reply_parts(self, update_id, parts):
+        """Annota che della risposta sono partiti parts messaggi."""
+        with self.transaction():
+            self.db.execute("UPDATE inbox SET reply_parts = ?, updated_at = ? WHERE update_id = ?",
+                            (parts, self.clock(), update_id))
 
     def set_reply(self, update_id, reply_message_id, text=None, send_back=()):
         """Annota il message_id della risposta appena Telegram lo restituisce, il suo testo e gli
@@ -333,5 +342,5 @@ def _entry(row):
         interpretation=json.loads(row["interpretation"]) if row["interpretation"] else None,
         links=json.loads(row["links"]) if row["links"] else None, reply_text=row["reply_text"],
         send_back=tuple(json.loads(row["send_back"])) if row["send_back"] else (),
-        unknown=json.loads(row["unknown"]) if row["unknown"] else None,
+        unknown=json.loads(row["unknown"]) if row["unknown"] else None, reply_parts=row["reply_parts"],
     )

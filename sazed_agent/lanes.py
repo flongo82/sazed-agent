@@ -66,6 +66,7 @@ INTAKE, ANSWERS = ("received", "read"), ("saved", "answered")
 THREAD_WINDOW, THREAD_LIMIT = 3 * 3600, 10   # il filo: i messaggi delle ultime ore, fino a dieci
 READ_WAIT = 600     # quanto una domanda aspetta la lettura degli elementi di cui parla
 MEANING_BATCH = 8   # schede calcolate insieme
+TEXT_LIMIT = 4000   # caratteri di un messaggio: Telegram ne accetta 4096, con un margine
 SHOW_MAX = 10       # quanti da riprovare Mostrameli indica per volta; poi «Più indietro» per gli altri
 MEANING_PAUSE = 300 # dopo un errore di llama-server, prima di riprovare
 # Le piattaforme di cui il video si scarica solo se l'anteprima non basta: meno richieste, e
@@ -94,6 +95,28 @@ def _cursor(text):
     if text.count(":") == 3 and message_id.isdigit() and kind in ("message", "item") and ref.isdigit():
         return int(message_id), kind, int(ref)
     return None
+
+
+def _parts(text, limit=None):
+    """Il testo in messaggi che Telegram accetta (TEXT_LIMIT, contati come li conta lui, in UTF-16):
+    si taglia a fine paragrafo, o a fine riga, o fra due parole, e solo se non c'è altro modo nel
+    mezzo di una parola."""
+    limit = limit or TEXT_LIMIT
+    parts = []
+    while _units(text) > limit:
+        end = min(len(text), limit)
+        while _units(text[:end]) > limit:
+            end -= 1
+        # un paragrafo o una riga nella seconda metà, se no fra due parole, se no dove capita
+        cut = next((at + len(mark) for mark, start in (("\n\n", end // 2), ("\n", end // 2), (" ", 1))
+                    if (at := text.rfind(mark, start, end)) > 0), end)
+        parts.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    return [*parts, text] if text or not parts else parts
+
+
+def _units(text):
+    return len(text.encode("utf-16-le")) // 2
 
 
 async def _read_note(item):
@@ -222,7 +245,7 @@ class Processor:
             links = entry.links if entry.links is not None else await self._resolve(reading)
             with self.journal.transaction():
                 self.memory.save(entry.chat_id, entry.message_id, self._sent_at(entry, reading),
-                                 self._drafts(reading, links))
+                                 self._drafts(reading, links), notes=False)  # la nota si sa dopo l'interpretazione
                 self.journal.set_links(entry.update_id, links)
                 self.journal.advance(entry.update_id, "read")
             self.wake["reading"].set()
@@ -250,9 +273,9 @@ class Processor:
                 drafts.append(Draft("note", note=meaning.note, look_up=meaning.look_up and self.lookup is not None,
                                     **described))
             self.memory.save(entry.chat_id, entry.message_id, self._sent_at(entry, reading), drafts)
-            for item_id in meaning.comment_on:
-                if item_id not in mine:
-                    self.memory.annotate(item_id, meaning.comment)
+            # anche senza commento: dopo una modifica, il commento che c'era non vale più
+            self.memory.comment(entry.chat_id, entry.message_id, self._sent_at(entry, reading), meaning.comment,
+                                [i for i in meaning.comment_on if i not in mine])
             for item_id in meaning.read_in_full:  # la domanda che lo chiede aspetta la lettura
                 self.memory.read_in_full(item_id)
             self.journal.advance(entry.update_id, "saved")
@@ -411,16 +434,30 @@ class Processor:
             if entry.reply_message_id is None:
                 t, hello = self._voice(entry)
                 text, send_back = await self._reply_text(entry, reading, meaning, t)
-                reply_id = await self.telegram.send_message(entry.chat_id, f"{hello}, {text}",
+                reply_id = await self.telegram.send_message(entry.chat_id, _parts(f"{hello}, {text}")[0],
                                                             reply_to=entry.message_id)
                 self.journal.set_reply(entry.update_id, reply_id, text, send_back)
                 entry = self.journal.get(entry.update_id)
+            await self._rest_of_reply(entry)
             await self._send_back(entry)  # dopo un arresto si rimandano tutti: meglio un doppione
             self.journal.advance(entry.update_id, "answered")
             state = "answered"
         if state == "answered":
             self.journal.advance(entry.update_id, "done")
             log.info("elemento %s completato: risposta inviata", entry.update_id)
+
+    async def _rest_of_reply(self, entry):
+        """Le parti di una risposta troppo lunga per un messaggio solo, dopo la prima, una dopo
+        l'altra: il registro sa quante ne sono partite, e dopo un arresto si riprende da lì."""
+        if not entry.reply_text:
+            return
+        _, hello = self._voice(entry)
+        parts = _parts(f"{hello}, {entry.reply_text}")
+        for n in range(entry.reply_parts, len(parts)):
+            await self.telegram.send_message(entry.chat_id, parts[n])
+            self.journal.set_reply_parts(entry.update_id, n + 1)
+        if len(parts) > 1:
+            log.info("elemento %s: risposta lunga, in %d messaggi", entry.update_id, len(parts))
 
     async def _reply_text(self, entry, reading, meaning, t):
         """Il testo della risposta e gli elementi di cui rimandare il messaggio originale."""
@@ -497,7 +534,10 @@ class Processor:
                 log.exception("lettura dell'elemento %s: errore inatteso", item.id)
             final = "unavailable" if getattr(err, "unavailable", False) else "failed" if getattr(
                 err, "permanent", False) else None
-            outcome = self.memory.read_failed(item.id, err, self.retry_delays, final=final)
+            outcome = self.memory.read_failed(item.id, err, self.retry_delays, final=final, reading=item.reading)
+            if outcome is None:
+                self._superseded(item)
+                return
             log.warning("lettura dell'elemento %s: %s (%s)", item.id, err,
                         "si riproverà" if outcome == "pending" else outcome)
             if outcome != "pending":
@@ -506,9 +546,8 @@ class Processor:
                 await self._say_unknown(item, "unreadable+retry" if final is None else "unreadable")
                 self._read_over()
             return
-        if not item.read_full and getattr(self.memory.get(item.id), "read_full", False):
-            log.info("elemento %s: ora va letto tutto, la lettura ricomincia", item.id)
-            self.wake["reading"].set()  # l'utente l'ha chiesto mentre lo si sfogliava
+        if getattr(self.memory.get(item.id), "reading", None) != item.reading:
+            self._superseded(item)  # per esempio, l'utente ha chiesto di leggerlo tutto mentre lo si sfogliava
             return
         description = None
         if self.claude is not None and (extract.text or extract.title or extract.images or extract.screen_text):
@@ -524,10 +563,10 @@ class Processor:
             except ClaudeError as err:
                 if err.config_error:
                     log.error("lettura dell'elemento %s rimandata di %g s: %s", item.id, self.config_pause, err)
-                    self.memory.read_later(item.id, self.config_pause, err)
+                    self.memory.read_later(item.id, self.config_pause, err, reading=item.reading)
                     return
                 if not err.permanent and self.memory.read_failed(
-                        item.id, err, self.retry_delays, err.retry_after or 0) == "pending":
+                        item.id, err, self.retry_delays, err.retry_after or 0, reading=item.reading) == "pending":
                     log.warning("descrizione dell'elemento %s: %s (si riproverà)", item.id, err)
                     return
                 log.warning("elemento %s custodito senza descrizione: %s", item.id, err)
@@ -536,15 +575,24 @@ class Processor:
         content = "\n\n".join(p for p in (extract.text, written and f"Text in the images:\n{written}") if p) or None
         if item.source in NOTES:
             content = None  # il testo di una nota è già la nota
-        self.memory.read_done(item.id, "complete" if extract.complete else "partial", content=content,
-                              title=(d and d.title) or extract.title, kind=d and d.kind,
-                              topics=d.topics if d else (), summary=d and d.summary, authors=d.authors if d else ())
+        if not self.memory.read_done(item.id, "complete" if extract.complete else "partial", content=content,
+                                     title=(d and d.title) or extract.title, kind=d and d.kind,
+                                     topics=d.topics if d else (), summary=d and d.summary,
+                                     authors=d.authors if d else (), reading=item.reading):
+            self._superseded(item)  # cambiato (o cancellato) mentre lo si leggeva: questo esito non vale più
+            return
         log.info("elemento %s letto (%s)%s", item.id, "completo" if extract.complete else "in parte",
                  "" if d else ", senza descrizione")
         read_something = extract.text or extract.title or extract.images or extract.screen_text
         if item.source not in NOTES and (not read_something or d is not None and not d.useful):
             await self._say_unknown(item, "unknown")  # non si è letto nulla, o nulla che dica qualcosa
         self._read_over()
+
+    def _superseded(self, item):
+        """La lettura di un elemento è superata: l'elemento è tornato da leggere (o non c'è più)
+        mentre lo si leggeva. Il suo esito non si scrive; se c'è una lettura nuova, la corsia la fa."""
+        log.info("elemento %s: cambiato durante la lettura, questo esito non si scrive", item.id)
+        self.wake["reading"].set()
 
     async def _say_unknown(self, item, reason):
         """Di un elemento non si sa di che cosa parla (reason: "unknown" se si è letto ma non dice

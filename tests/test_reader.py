@@ -2,7 +2,7 @@
 
 import unittest
 
-from sazed_agent.reader import MAX_BYTES, Reader, ReadError, page, public_host
+from sazed_agent.reader import MAX_BYTES, Reader, ReadError, page, public_address
 from tests.fake_web import FakeWeb, allow_all
 
 RECIPE = """<html><head><title>Torta di mele | Cucina</title>
@@ -143,23 +143,45 @@ class ReaderTest(unittest.IsolatedAsyncioTestCase):
         for url in ("http://127.0.0.1:8080/", "http://[::1]/", "http://10.0.0.5/x"):
             with self.subTest(url), self.assertRaisesRegex(ReadError, "non pubblico"):
                 await reader.read(url)
-        reader.allow = lambda host: public_host(host) if host != "example.com" else _true()
+        reader.allow = lambda host: public_address(host) if host != "example.com" else _same(host)
         with self.assertRaisesRegex(ReadError, "non pubblico"):
             await reader.read("https://example.com/r")  # nemmeno dopo un rimando
         self.assertEqual(self.web.requests, ["https://example.com/r"])
         reel = "https://www.instagram.com/reel/XYZ/"
         self.web.oembed("instagram", reel, {"title": "Torta", "thumbnail_url": "http://192.168.1.1/c.jpg"})
-        reader.allow = lambda host: public_host(host) if host != "www.instagram.com" else _true()
+        reader.allow = lambda host: public_address(host) if host != "www.instagram.com" else _same(host)
         self.assertEqual((await reader.read(reel)).images, ())  # nemmeno la copertina
         self.assertNotIn("http://192.168.1.1/c.jpg", self.web.requests)
+
+    async def test_the_connection_goes_to_the_address_that_was_checked(self):
+        seen = []
+
+        def answer(request):
+            seen.append((str(request.url), request.headers["host"], request.extensions.get("sni_hostname")))
+            return 200, b"<title>Fissato</title>", {"content-type": "text/html"}
+        self.web.route("https://93.184.216.34/pagina?x=1", body=answer)
+        self.web.route("http://[2606:2800:220:1::1]:8080/altra", body=answer)
+
+        async def checked(host):  # il DNS, controllato una volta: la connessione non lo richiede
+            return {"example.com": "93.184.216.34", "example.org": "2606:2800:220:1::1"}.get(host)
+        self.reader.allow = checked
+        self.assertEqual((await self.reader.read("https://example.com/pagina?x=1")).title, "Fissato")
+        await self.reader.read("http://example.org:8080/altra")
+        self.assertEqual(seen, [("https://93.184.216.34/pagina?x=1", "example.com", "example.com"),
+                                ("http://[2606:2800:220:1::1]:8080/altra", "example.org:8080", None)])
+
+    async def test_a_public_name_is_reached_at_its_ipv4_address_and_a_private_one_not_at_all(self):
+        self.assertEqual(await public_address("8.8.8.8"), "8.8.8.8")
+        self.assertIsNone(await public_address("192.168.1.1"))
+        self.assertIsNone(await public_address("localhost"))  # risolto senza rete: 127.0.0.1 e ::1
 
     async def test_only_web_addresses(self):
         with self.assertRaisesRegex(ReadError, "non leggibile"):
             await self.reader.read("ftp://example.com/file")
 
 
-async def _true():
-    return True
+async def _same(host):
+    return host
 
 
 if __name__ == "__main__":

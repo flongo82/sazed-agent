@@ -18,7 +18,8 @@ from sazed_agent.reader import OEMBED
 
 
 async def allow_all(host):
-    return True
+    """Ogni host è pubblico, e la richiesta va al nome stesso: così le rotte restano per nome."""
+    return host
 
 
 class FakeWeb:

@@ -8,11 +8,19 @@ messaggio d'origine (chat_id, message_id), con cui il bot può riproporlo.
 Ogni elemento nasce da un messaggio: una nota, un link (uno per ogni link del messaggio) o un
 file (foto, video, vocale, audio, documento). Il salvataggio è idempotente: rifatto con gli
 stessi dati non crea doppioni, e rifatto dopo una modifica del messaggio lo aggiorna. Lo stesso
-link, o lo stesso file, mandato una seconda volta resta un elemento solo: le parole nuove che
-lo accompagnano si aggiungono alla sua nota.
+link, o lo stesso file, mandato una seconda volta resta un elemento solo.
+
+Elemento e messaggi sono separati (mentions, dalla versione 6): ogni messaggio che porta un
+elemento, o che ne parla (un commento mandato dopo), ha la sua riga con le sue parole. Una
+modifica del messaggio cambia solo le sue righe: le parole degli altri messaggi restano, e un
+elemento si cancella solo quando nessun messaggio lo porta più (se lo porta ancora un altro, il
+riferimento passa a quello). La nota di un elemento (items.note) è l'insieme di quelle parole.
 
 La lettura di link e file è un lavoro a parte, con i suoi tentativi: ogni elemento da leggere
 ha lo stato "pending" e un istante per il prossimo tentativo (to_read, read_done, read_failed).
+Ogni volta che un elemento torna da leggere il suo numero di lettura (reading) cresce: l'esito di
+una lettura partita prima non si scrive, e i numeri degli elementi non si riusano mai, così una
+lettura in ritardo non finisce su un altro elemento.
 Di un link o di un file la descrizione (tipo, titolo, autori, argomenti, riassunto) nasce dal
 contenuto letto, e un nuovo salvataggio del messaggio non la tocca; di una nota nasce dalle sue
 parole. Un documento di norma si legge solo in parte (i dati del file e le prime pagine): tutto
@@ -38,15 +46,14 @@ import numpy
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-VERSION = 5
+VERSION = 6
 SOURCES = ("note", "link", "photo", "video", "video_note", "voice", "audio", "document")
 FILES = SOURCES[2:]
 EXTRACTIONS = ("pending", "complete", "partial", "failed", "unavailable")
 
-SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS items (
-  id          INTEGER PRIMARY KEY,
-  chat_id     INTEGER NOT NULL,
+ITEMS = f"""(
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,   -- mai riusato
+  chat_id     INTEGER NOT NULL,   -- il messaggio che lo porta, il primo fra quelli che ci sono
   message_id  INTEGER NOT NULL,
   source      TEXT    NOT NULL CHECK (source IN {SOURCES}),
   origin      TEXT    UNIQUE,     -- link normalizzato o file: lo stesso è un elemento solo
@@ -58,7 +65,7 @@ CREATE TABLE IF NOT EXISTS items (
   authors     TEXT,               -- lista JSON: chi ha scritto un documento o un libro
   topics      TEXT,               -- lista JSON
   summary     TEXT,
-  note        TEXT,               -- le parole dell'utente
+  note        TEXT,               -- le parole dell'utente, da tutti i messaggi che ne parlano (mentions)
   content     TEXT,               -- il testo estratto dalla fonte
   extraction  TEXT    NOT NULL CHECK (extraction IN {EXTRACTIONS}),
   place       TEXT,
@@ -73,8 +80,15 @@ CREATE TABLE IF NOT EXISTS items (
   next_read_at  REAL    NOT NULL DEFAULT 0,
   read_error    TEXT,
   read_full     INTEGER NOT NULL DEFAULT 0,  -- 1: l'utente vuole che si legga tutto
-  retryable     INTEGER NOT NULL DEFAULT 0   -- 1: lettura fallita per un problema passeggero: si può riprovare
-);
+  retryable     INTEGER NOT NULL DEFAULT 0,  -- 1: lettura fallita per un problema passeggero: si può riprovare
+  reading       INTEGER NOT NULL DEFAULT 0   -- cresce a ogni nuova lettura: l'esito di una vecchia non si scrive
+)"""
+COLUMNS_5 = ("id, chat_id, message_id, source, origin, url, platform, site, kind, title, authors, topics, summary,"
+             " note, content, extraction, place, latitude, longitude, taken_at, media, sent_at, saved_at,"
+             " updated_at, read_attempts, next_read_at, read_error, read_full, retryable")
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS items {ITEMS};
 CREATE UNIQUE INDEX IF NOT EXISTS items_note ON items (chat_id, message_id) WHERE origin IS NULL;
 CREATE INDEX IF NOT EXISTS items_message ON items (chat_id, message_id);
 CREATE INDEX IF NOT EXISTS items_sent ON items (sent_at);
@@ -108,6 +122,19 @@ ON items BEGIN
   INSERT INTO items_fts (rowid, title, authors, topics, summary, note, content, url)
   VALUES (new.id, new.title, new.authors, new.topics, new.summary, new.note, new.content, new.url);
 END;
+CREATE TABLE IF NOT EXISTS mentions (
+  item_id     INTEGER NOT NULL,
+  chat_id     INTEGER NOT NULL,
+  message_id  INTEGER NOT NULL,
+  sent_at     INTEGER NOT NULL,
+  brings      INTEGER NOT NULL,   -- 1: il messaggio contiene l'elemento; 0: ne parla soltanto
+  words       TEXT,               -- le parole di quel messaggio sull'elemento
+  PRIMARY KEY (item_id, chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS mentions_message ON mentions (chat_id, message_id);
+CREATE TRIGGER IF NOT EXISTS mentions_delete AFTER DELETE ON items BEGIN
+  DELETE FROM mentions WHERE item_id = old.id;
+END;
 """
 
 # Da una versione dello schema alla successiva: ciò che manca a un database di prima. Dopo una
@@ -122,6 +149,17 @@ MIGRATIONS = {
         "DROP TABLE items_fts"),
     4: (),  # la tabella dei significati, nuova: la crea lo schema
     5: ("ALTER TABLE items ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0",),
+    # numeri mai riusati (AUTOINCREMENT) e numero di lettura: la tabella si rifà, con i suoi dati
+    6: (f"CREATE TABLE items_v6 {ITEMS}", f"INSERT INTO items_v6 ({COLUMNS_5}) SELECT {COLUMNS_5} FROM items",
+        "DROP TRIGGER IF EXISTS items_fts_insert", "DROP TRIGGER IF EXISTS items_fts_delete",
+        "DROP TRIGGER IF EXISTS items_fts_update", "DROP TRIGGER IF EXISTS meanings_delete",
+        "DROP TABLE items", "ALTER TABLE items_v6 RENAME TO items", "DROP TABLE IF EXISTS items_fts"),
+}
+# Dopo lo schema: i dati che una tabella nuova eredita. Le parole di prima restano tutte al
+# messaggio che porta l'elemento: quale messaggio avesse aggiunto che cosa non si sa più.
+FILLS = {
+    6: ("INSERT OR IGNORE INTO mentions (item_id, chat_id, message_id, sent_at, brings, words)"
+        " SELECT id, chat_id, message_id, sent_at, 1, note FROM items",),
 }
 
 # Peso di ogni colonna di items_fts nell'ordinamento per pertinenza (bm25).
@@ -200,6 +238,7 @@ class Item:
     read_full: bool = False    # l'utente ha chiesto di leggerlo tutto
     retryable: bool = False    # la lettura è fallita per un problema passeggero: si può riprovare
     updated_at: float = 0.0    # l'ultimo cambiamento: il significato calcolato prima va rifatto
+    reading: int = 0           # il numero della lettura: l'esito si scrive solo se è ancora quello
 
 
 @dataclass(frozen=True)
@@ -262,23 +301,31 @@ class Coppermind:
         if version > VERSION:
             raise CoppermindError(f"database alla versione {version}, questo modulo arriva alla {VERSION}")
         with transaction(db):
-            if version and db.execute("SELECT 1 FROM sqlite_master WHERE name = 'items'").fetchone():
+            older = version and db.execute("SELECT 1 FROM sqlite_master WHERE name = 'items'").fetchone()
+            if older:
                 for step in range(version + 1, VERSION + 1):
                     for statement in MIGRATIONS.get(step, ()):
                         db.execute(statement)
             for statement in _statements(SCHEMA):
                 db.execute(statement)
+            if older:
+                for step in range(version + 1, VERSION + 1):
+                    for statement in FILLS.get(step, ()):
+                        db.execute(statement)
             if version < VERSION:
                 db.execute("INSERT INTO items_fts (items_fts) VALUES ('rebuild')")
                 db.execute(f"PRAGMA user_version = {VERSION}")
 
-    def save(self, chat_id, message_id, sent_at, drafts):
+    def save(self, chat_id, message_id, sent_at, drafts, notes=True):
         """Salva gli elementi di un messaggio e ne restituisce l'esito, nello stesso ordine.
 
         Rifatto con gli stessi dati non cambia nulla; dopo una modifica del messaggio aggiorna
-        i suoi elementi e toglie quelli spariti. Di una nota, una descrizione nuova del modello
-        sostituisce la vecchia; senza, se cambiano le parole, la vecchia decade. Di link e file
-        la descrizione e il testo letto restano finché resta la fonte.
+        i suoi elementi e le sue parole, e lascia quelli che non porta più (cancellati se non li
+        porta nessun altro messaggio). Di una nota, una descrizione nuova del modello sostituisce
+        la vecchia; senza, se cambiano le parole, la vecchia decade (e se la nota era da leggere,
+        si rilegge). Di link e file la descrizione e il testo letto restano finché resta la fonte.
+        Con notes falso il salvataggio non sa ancora quale sia la nota del messaggio (le parole
+        non sono ancora interpretate): la lascia com'è.
         """
         now = self.clock()
         drafts = unique(drafts)
@@ -287,37 +334,53 @@ class Coppermind:
             for draft in drafts:
                 origin = _origin(draft)
                 row = self._holder(chat_id, message_id, origin)
-                if row is not None and (row["chat_id"], row["message_id"]) != (chat_id, message_id):
-                    self._add_note(row, draft.note, now)
-                    continue
                 values = _values(draft)
                 if row is None:
-                    kept.append(self.db.execute(
+                    item_id = self.db.execute(
                         "INSERT INTO items (chat_id, message_id, source, origin, url, platform, site,"
                         " kind, title, topics, summary, note, media, extraction, sent_at, saved_at, updated_at,"
                         " next_read_at)"
                         " VALUES (:chat_id, :message_id, :source, :origin, :url, :platform, :site,"
                         " :kind, :title, :topics, :summary, :note, :media, :extraction, :sent_at, :now, :now, :now)",
                         dict(values, chat_id=chat_id, message_id=message_id, origin=origin,
-                             sent_at=sent_at, now=now)).lastrowid)
-                    continue
-                self.db.execute(
-                    "UPDATE items SET source = :source, url = :url, platform = :platform, site = :site,"
-                    " media = :media, sent_at = :sent_at, updated_at = :now,"
-                    " kind = CASE WHEN source != 'note' THEN kind WHEN :described THEN :kind"
-                    "  WHEN note IS :note THEN kind END,"
-                    " title = CASE WHEN source != 'note' THEN COALESCE(title, :title)"
-                    "  WHEN :described OR note IS NOT :note THEN :title ELSE title END,"
-                    " topics = CASE WHEN source != 'note' THEN topics WHEN :described THEN :topics"
-                    "  WHEN note IS :note THEN topics END,"
-                    " summary = CASE WHEN source != 'note' THEN summary WHEN :described THEN :summary"
-                    "  WHEN note IS :note THEN summary END,"
-                    " note = :note WHERE id = :id",
-                    dict(values, sent_at=sent_at, now=now, id=row["id"], described=draft.described))
-                kept.append(row["id"])
+                             sent_at=sent_at, now=now)).lastrowid
+                elif (row["chat_id"], row["message_id"]) == (chat_id, message_id):
+                    item_id = row["id"]
+                    same = self._words(item_id, chat_id, message_id) == (draft.note or None)
+                    self.db.execute(
+                        "UPDATE items SET source = :source, url = :url, platform = :platform, site = :site,"
+                        " media = :media, sent_at = :sent_at, updated_at = :now,"
+                        " kind = CASE WHEN source != 'note' THEN kind WHEN :described THEN :kind"
+                        "  WHEN :same THEN kind END,"
+                        " title = CASE WHEN source != 'note' THEN COALESCE(title, :title)"
+                        "  WHEN :described OR NOT :same THEN :title ELSE title END,"
+                        " topics = CASE WHEN source != 'note' THEN topics WHEN :described THEN :topics"
+                        "  WHEN :same THEN topics END,"
+                        " summary = CASE WHEN source != 'note' THEN summary WHEN :described THEN :summary"
+                        "  WHEN :same THEN summary END,"
+                        # una nota cambiata: la lettura di prima non vale più, e se è da leggere si rilegge
+                        " extraction = CASE WHEN source != 'note' OR :same THEN extraction"
+                        "  ELSE :extraction END,"
+                        " reading = CASE WHEN source != 'note' OR :same THEN reading ELSE reading + 1 END,"
+                        " read_attempts = CASE WHEN source != 'note' OR :same THEN read_attempts ELSE 0 END,"
+                        " next_read_at = CASE WHEN source != 'note' OR :same THEN next_read_at ELSE :now END"
+                        " WHERE id = :id",
+                        dict(values, sent_at=sent_at, now=now, id=item_id, described=draft.described, same=same))
+                else:
+                    item_id = row["id"]  # c'era già, portato da un altro messaggio: questo lo porta di nuovo
+                self._mention(item_id, chat_id, message_id, sent_at, True, draft.note)
+                kept.append(item_id)
             marks = ", ".join("?" * len(kept))
-            self.db.execute(f"DELETE FROM items WHERE chat_id = ? AND message_id = ? AND id NOT IN ({marks})",
-                            (chat_id, message_id, *kept))
+            spared = "" if notes else " AND item_id NOT IN (SELECT id FROM items WHERE source = 'note')"
+            gone = [r[0] for r in self.db.execute(
+                f"SELECT item_id FROM mentions WHERE chat_id = ? AND message_id = ? AND brings"
+                f" AND item_id NOT IN ({marks}){spared}", (chat_id, message_id, *kept))]
+            for item_id in gone:
+                self.db.execute("DELETE FROM mentions WHERE item_id = ? AND chat_id = ? AND message_id = ?",
+                                (item_id, chat_id, message_id))
+                self._settle(item_id, now)
+            for item_id in kept:
+                self._gather(item_id, now)
         return self.outcomes(chat_id, message_id, drafts)
 
     def outcomes(self, chat_id, message_id, drafts):
@@ -330,15 +393,25 @@ class Coppermind:
                 found.append(Outcome(_item(row), "saved" if mine else "already"))
         return found
 
-    def annotate(self, item_id, note):
-        """Aggiunge parole dell'utente alla nota di un elemento (un commento mandato dopo).
-        False se l'elemento non c'è."""
-        row = self.db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
-        if row is None:
-            return False
+    def comment(self, chat_id, message_id, sent_at, words, item_ids):
+        """Le parole di un messaggio su elementi che non porta (un commento mandato dopo): sono le
+        sue, e sostituiscono quelle che lo stesso messaggio aveva detto prima; gli elementi di cui
+        non parla più le perdono. Restituisce gli elementi annotati (quelli che ci sono)."""
+        now, done = self.clock(), []
         with transaction(self.db):
-            self._add_note(row, note, self.clock())
-        return True
+            for item_id in dict.fromkeys(item_ids):
+                if words and self.db.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)).fetchone():
+                    self._mention(item_id, chat_id, message_id, sent_at, False, words)
+                    done.append(item_id)
+            marks = ", ".join("?" * len(done))
+            dropped = [r[0] for r in self.db.execute(
+                f"SELECT item_id FROM mentions WHERE chat_id = ? AND message_id = ? AND NOT brings"
+                f" AND item_id NOT IN ({marks})", (chat_id, message_id, *done))]
+            self.db.execute(f"DELETE FROM mentions WHERE chat_id = ? AND message_id = ? AND NOT brings"
+                            f" AND item_id NOT IN ({marks})", (chat_id, message_id, *done))
+            for item_id in done + dropped:
+                self._gather(item_id, now)
+        return done
 
     def relink(self, item_id, url):
         """Porta un link al suo indirizzo vero (dietro un link breve). False, e nulla cambia, se
@@ -376,22 +449,25 @@ class Coppermind:
             f" AND source IN ({', '.join('?' * len(sources))})", sources).fetchone()[0]
 
     def read_done(self, item_id, extraction, content=None, title=None, kind=None, topics=(), summary=None,
-                  authors=()):
+                  authors=(), reading=None):
         """Annota ciò che la lettura ha trovato: il testo e la descrizione che ne nasce. Con
-        "unavailable" o "failed" (una fonte che non si legge) nulla di ciò che c'era si perde."""
+        "unavailable" o "failed" (una fonte che non si legge) nulla di ciò che c'era si perde.
+        Con reading, solo se l'elemento è ancora a quella lettura: False se nel frattempo è
+        cambiato (va riletto) o non c'è più."""
         if extraction not in EXTRACTIONS or extraction == "pending":
             raise ValueError(f"esito di lettura non ammesso: {extraction}")
         with transaction(self.db):
-            self.db.execute(
+            return self.db.execute(
                 "UPDATE items SET extraction = :extraction, content = COALESCE(:content, content),"
                 " title = COALESCE(:title, title), kind = COALESCE(:kind, kind),"
                 " authors = COALESCE(:authors, authors),"
                 " topics = COALESCE(:topics, topics), summary = COALESCE(:summary, summary),"
-                " read_error = NULL, retryable = 0, updated_at = :now WHERE id = :id",
+                " read_error = NULL, retryable = 0, updated_at = :now"
+                " WHERE id = :id AND (:reading IS NULL OR reading = :reading)",
                 {"extraction": extraction, "content": content, "title": title, "kind": kind,
                  "authors": json.dumps(list(authors), ensure_ascii=False) if authors else None,
                  "topics": json.dumps(list(topics), ensure_ascii=False) if topics else None,
-                 "summary": summary, "now": self.clock(), "id": item_id})
+                 "summary": summary, "now": self.clock(), "id": item_id, "reading": reading}).rowcount > 0
 
     def read_in_full(self, item_id):
         """L'utente vuole che un documento si legga tutto: torna da leggere, con i suoi
@@ -404,7 +480,7 @@ class Coppermind:
             if not row["read_full"]:
                 self.db.execute(
                     "UPDATE items SET read_full = 1, extraction = 'pending', read_attempts = 0,"
-                    " next_read_at = ?, read_error = NULL, updated_at = ? WHERE id = ?",
+                    " reading = reading + 1, next_read_at = ?, read_error = NULL, updated_at = ? WHERE id = ?",
                     (self.clock(), self.clock(), item_id))
         return True
 
@@ -416,7 +492,7 @@ class Coppermind:
             if row is None or row["extraction"] != "failed" or row["chat_id"] != chat_id:
                 return False
             self.db.execute("UPDATE items SET extraction = 'pending', read_attempts = 0, next_read_at = ?,"
-                            " read_error = NULL, retryable = 0, updated_at = ? WHERE id = ?",
+                            " reading = reading + 1, read_error = NULL, retryable = 0, updated_at = ? WHERE id = ?",
                             (self.clock(), self.clock(), item_id))
         return True
 
@@ -459,14 +535,14 @@ class Coppermind:
         best = sorted(sorted(scored, key=lambda s: (-s[0], -s[1], s[2]))[:limit], key=lambda s: s[2])
         return [(round(100 * start / len(item.content)), chunk) for *_, start, chunk in best]
 
-    def read_failed(self, item_id, error, delays, min_delay=0, final=None):
+    def read_failed(self, item_id, error, delays, min_delay=0, final=None, reading=None):
         """Una lettura non è riuscita. Con final ("unavailable" o "failed") è l'esito definitivo;
         altrimenti si riprova dopo l'attesa successiva, e finite le attese l'esito è "failed", ma
         si può riprovare (retryable): il problema era passeggero. Restituisce lo stato di lettura
-        risultante."""
+        risultante; None se l'elemento non c'è più, o con reading non è più a quella lettura."""
         with transaction(self.db):
-            row = self.db.execute("SELECT read_attempts FROM items WHERE id = ?", (item_id,)).fetchone()
-            if row is None:
+            row = self.db.execute("SELECT read_attempts, reading FROM items WHERE id = ?", (item_id,)).fetchone()
+            if row is None or reading is not None and row["reading"] != reading:
                 return None
             attempts, now = row[0] + 1, self.clock()
             retryable = final is None and attempts > len(delays)
@@ -479,12 +555,13 @@ class Coppermind:
                 (attempts, next_at, str(error)[:500], final, int(retryable), now, item_id))
         return final or "pending"
 
-    def read_later(self, item_id, seconds, error):
+    def read_later(self, item_id, seconds, error, reading=None):
         """Rimanda una lettura senza contare un tentativo: il problema non è della fonte (per
-        esempio la chiave di Claude rifiutata)."""
+        esempio la chiave di Claude rifiutata). Con reading, solo se è ancora a quella lettura."""
         with transaction(self.db):
-            self.db.execute("UPDATE items SET next_read_at = ?, read_error = ?, updated_at = ? WHERE id = ?",
-                            (self.clock() + seconds, str(error)[:500], self.clock(), item_id))
+            self.db.execute("UPDATE items SET next_read_at = ?, read_error = ?, updated_at = ?"
+                            " WHERE id = ? AND (? IS NULL OR reading = ?)",
+                            (self.clock() + seconds, str(error)[:500], self.clock(), item_id, reading, reading))
 
     def get(self, item_id):
         row = self.db.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
@@ -569,10 +646,43 @@ class Coppermind:
                                    (chat_id, message_id)).fetchone()
         return self.db.execute("SELECT * FROM items WHERE origin = ?", (origin,)).fetchone()
 
-    def _add_note(self, row, note, now):
-        if note and note not in (row["note"] or ""):
-            self.db.execute("UPDATE items SET note = ?, updated_at = ? WHERE id = ?",
-                            (f"{row['note']}\n{note}" if row["note"] else note, now, row["id"]))
+    def _words(self, item_id, chat_id, message_id):
+        """Le parole che un messaggio ha detto di un elemento, o None."""
+        row = self.db.execute("SELECT words FROM mentions WHERE item_id = ? AND chat_id = ? AND message_id = ?",
+                              (item_id, chat_id, message_id)).fetchone()
+        return row[0] if row else None
+
+    def _mention(self, item_id, chat_id, message_id, sent_at, brings, words):
+        """Il messaggio porta l'elemento (brings) o ne parla, con queste parole: le sue di prima
+        si sostituiscono. Un messaggio che lo porta resta tale anche se poi ne parla soltanto."""
+        self.db.execute(
+            "INSERT INTO mentions (item_id, chat_id, message_id, sent_at, brings, words) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (item_id, chat_id, message_id) DO UPDATE SET words = excluded.words,"
+            " sent_at = excluded.sent_at, brings = MAX(brings, excluded.brings)",
+            (item_id, chat_id, message_id, sent_at, int(brings), words or None))
+
+    def _settle(self, item_id, now):
+        """Un messaggio non porta più l'elemento: se nessun altro lo porta si cancella (con le sue
+        parole e il suo significato), altrimenti passa al primo che lo porta ancora."""
+        other = self.db.execute("SELECT chat_id, message_id, sent_at FROM mentions WHERE item_id = ? AND brings"
+                                " ORDER BY sent_at, message_id LIMIT 1", (item_id,)).fetchone()
+        if other is None:
+            self.db.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            return
+        self.db.execute("UPDATE items SET chat_id = ?, message_id = ?, sent_at = ?, updated_at = ? WHERE id = ?",
+                        (other["chat_id"], other["message_id"], other["sent_at"], now, item_id))
+        self._gather(item_id, now)
+
+    def _gather(self, item_id, now):
+        """La nota dell'elemento: le parole dei messaggi che lo portano, poi quelle dei commenti, in
+        ordine di tempo, una volta sola."""
+        words = [r[0] for r in self.db.execute(
+            "SELECT words FROM mentions WHERE item_id = ? AND words IS NOT NULL"
+            " ORDER BY brings DESC, sent_at, message_id",
+            (item_id,))]
+        note = "\n".join(dict.fromkeys(words)) or None
+        self.db.execute("UPDATE items SET note = ?, updated_at = ? WHERE id = ? AND note IS NOT ?",
+                        (note, now, item_id, note))
 
 
 def parse_link(url):
@@ -678,7 +788,7 @@ def _item(row):
         media=json.loads(row["media"]) if row["media"] else {}, sent_at=row["sent_at"],
         saved_at=row["saved_at"], read_error=row["read_error"], read_full=bool(row["read_full"]),
         retryable=bool(row["retryable"]),
-        updated_at=row["updated_at"],
+        updated_at=row["updated_at"], reading=row["reading"],
     )
 
 

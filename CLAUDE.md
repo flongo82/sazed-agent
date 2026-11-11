@@ -53,6 +53,8 @@ rimandato. Ricerca per significato con Qwen3-Embedding-0.6B e `llama-server` di 
   temporanea che sparisce subito dopo
 - `sazed_agent/documents.py`: i documenti: dati del file e prime pagine, o tutto il testo su
   richiesta; PDF con poppler, EPUB, DOCX e ODT con la libreria standard e limiti sugli archivi
+- `sazed_agent/reader.py`: si connette all'indirizzo che `public_address` ha controllato, non al
+  nome (DNS rebinding), con il nome nell'header Host e nel nome TLS; nessun riuso delle connessioni
 - `sazed_agent/lookup.py`: le schede delle opere pubblicate da fonti libere (Open Library,
   Crossref, Wikipedia), con uno User-Agent che dice chi chiama: una voce di Wikipedia solo se il
   titolo è quello dell'opera, un titolo sentito male ritrovato fra le opere del suo autore. Si
@@ -184,6 +186,14 @@ scripts/mtproto-probe.sh           # prova MTProto con il vero Telegram (agente 
   message_id). Un elemento per nota, per link, per file; lo stesso link o file resta un
   elemento solo. Ogni cambio di schema alza `VERSION` (`PRAGMA user_version`) con la sua
   migrazione e il suo test, e un database più recente del codice si rifiuta.
+- Elemento e messaggi sono separati (`mentions`, schema 6): le parole di ogni messaggio su un
+  elemento stanno nella sua riga, `items.note` le raccoglie. Una modifica tocca solo le righe di
+  quel messaggio; un elemento si cancella solo quando nessun messaggio lo porta più. Il primo
+  salvataggio di un messaggio (prima dell'interpretazione) usa `notes=False`: la nota non si sa
+  ancora. I commenti passano da `comment()`, che sostituisce quelli dello stesso messaggio.
+- I numeri degli elementi non si riusano (AUTOINCREMENT) e ogni lettura ha il suo numero
+  (`reading`, cresce a ogni ritorno a "pending"): `read_done`, `read_failed` e `read_later` lo
+  ricevono e non scrivono l'esito di una lettura superata.
 - La descrizione di un link o di un file nasce dal contenuto letto, mai dal solo indirizzo:
   prima della lettura un elemento resta senza titolo né argomenti. Quella di una nota nasce
   dalle sue parole.
